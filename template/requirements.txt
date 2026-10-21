@@ -1,0 +1,6 @@
+# 看板运行依赖（版本锁定）。Python ≥ 3.9。
+Flask==3.0.3
+PyYAML==6.0.3
+duckdb==1.4.5
+# 用 sqlalchemy 通道时再装（及对应驱动，如 psycopg2-binary / trino / PyMySQL / clickhouse-sqlalchemy / PyHive）：
+# SQLAlchemy==2.0.36

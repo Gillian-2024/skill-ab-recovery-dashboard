@@ -1,0 +1,168 @@
+# 看板配置样例：对应 tools/demo_data.py 生成的合成数据。
+# 接自己的数据时，按 references/config-schema.md 逐段改；改完运行 python3 tools/check_config.py 校验。
+
+title: 搜索转化看板（演示）
+
+server:
+  host: 127.0.0.1          # 服务无鉴权，只能本机
+  port: 5050
+
+schedule:
+  daily_at: "09:40"        # 每天几点自动拉昨天的数
+  backfill_days: 14        # 每次检查并补齐最近几天缺的 / 不完整的
+  retry_gap_hours: 2       # 昨天数据不完整时，隔几小时重试
+  retry_until_hour: 20     # 重试到几点为止
+
+# 取数通道：duckdb（本地文件）/ sqlalchemy（数据库 URL，连接串放 .env）/ command（自定义命令）
+source:
+  type: duckdb
+  dialect: duckdb          # SQL 方言：duckdb / trino / spark / postgres / mysql / clickhouse
+  path: data/demo.duckdb
+  max_rows: 5000           # 单条查询返回行数上限，到达即报错（防截断）
+  timeout_s: 600
+
+# 事件明细表：一行一个事件
+table:
+  name: events
+  device: user_id          # 去重单位（设备 / 用户）
+  date: event_date         # 日期分区列
+  date_type: int           # int（YYYYMMDD）/ date / string（配 date_format）
+  event: event_name
+  columns:                 # 指标库筛选条件可用的列（白名单）
+    string: [entry, platform, region]
+    number: [position, duration_ms, item_duration_ms]
+    bool: [is_valid]
+
+# 看数范围（页面上的范围按钮）；where 是你写的 SQL 片段，原样拼进查询
+scopes:
+  - key: ALL
+    label: 全部
+    where: "1 = 1"
+  - key: MOBILE
+    label: 仅 Android
+    where: "platform = 'android'"
+
+# 可选：范围下再按某一列细分（页面上的国家 / 地区选框）
+subscope:
+  column: region
+  label: 地区
+  values: [NA, EU, AP]
+  labels: { NA: 北美, EU: 欧洲, AP: 亚太 }
+
+funnel:
+  # 档位：同一套漏斗按入口拆开看。union 档 = 任一成员档的路径到达（不是相加）
+  tiers:
+    - key: all
+      label: 全量
+      union: [app, widget]
+    - key: app
+      label: 站内
+      where: "entry = 'in_app'"
+    - key: widget
+      label: 桌面组件
+      where: "entry = 'widget'"
+      skip: [open]                            # 这个入口天然没有「打开搜索」这一步，包含式漏斗里视为通过（写步骤 key）
+  steps:                                      # 有顺序：包含式漏斗要求当天走过前面所有步
+    - { key: home,    label: 首页曝光,   event: home_view,       segment: 入口, shared: true }   # shared：不分档
+    - { key: open,    label: 打开搜索,   event: search_open,     segment: 入口 }
+    - { key: query,   label: 提交搜索,   event: query_submit,    segment: 入口 }
+    - { key: result,  label: 结果页加载, event: result_view,     segment: 结果页 }
+    - { key: imp,     label: 卡片曝光,   event: item_impression, segment: 结果页 }
+    - { key: click,   label: 卡片点击,   event: item_click,      segment: 结果页 }
+    - { key: play,    label: 开始播放,   event: play_start,      segment: 消费 }
+    - { key: play3s,  label: 有效播放,   event: play_end,        segment: 消费, where: "is_valid OR duration_ms > 3000" }
+  extra_steps:                                # 只做独立去重计数、不进包含式链路的事件
+    - { key: noresult, label: 无结果, event: no_result }
+  core: [query, result, click, play]          # 核心链路：表格加粗、条形图深色
+  anchor: query                               # 「较 X」列的基准步
+  completeness: { step: result, min_ratio: 0.6 }  # 该步 UV < 前 7 日中位数 × 0.6 → 当天标为不完整
+  kpis:                                       # 顶部指标卡；第一张是北极星大卡
+    - { name: 结果页点击渗透率, num: click, den: result, note: 卡片点击 UV ÷ 结果页加载 UV }
+    - { name: 结果页加载 UV, num: result, den: null, note: 日均 }
+    - { name: 卡片 CTR（UV）, num: click, den: imp }
+    - { name: 无结果率, num: noresult, den: result, lower_is_better: true }
+  breakdown:                                  # 可选：按位置看 PV 点击率
+    column: position
+    max: 12
+    expose_step: imp
+    click_step: click
+    label: 位置 CTR（PV）
+  dau:                                        # 可选：活跃设备数，用于算搜索渗透率
+    table: daily_active
+    date: event_date
+    device: user_id
+    subscope_column: region
+    where_by_scope: { ALL: "1 = 1" }          # 没写的范围不出渗透率
+
+experiment:
+  group:
+    column: exp_groups
+    match: like                               # equals：列值就是分组号；like：列里含分组号
+    pattern: "%,{id},%"
+  identify_events: [result_view, item_impression, item_click, no_result]   # 这些事件当天带组号即认组
+  extra_events: []                            # 指标库里还想用、但不在漏斗里的事件
+  cadence: { check: 2, stop_loss: 3, interim: 7, final: 14 }             # 查生效 / 判止损 / 中期读数 / 出结论
+  cum_days: [3, 7, 14]                        # 「前 N 天累计」行
+  alpha: 0.05
+  srm_p: 0.001
+  cap_pre_days: 7                             # P99 封顶取上线日之前几天
+
+# 预置指标（页面上还能自定义更多）
+metrics:
+  - key: click_rate
+    name: 结果页点击渗透率
+    role: north_star                          # north_star / process / guardrail
+    kind: ratio
+    numerator:   { event: item_click,  agg: uv }
+    denominator: { event: result_view, agg: uv }
+    numerator_within_denominator: true
+    note: 卡片点击 UV ÷ 结果页加载 UV
+  - key: click_to_valid
+    name: 点击 → 有效播放 UV 转化
+    role: process
+    kind: ratio
+    numerator:   { event: play_end, agg: uv, filters: [["any", [["is_valid", "=", "true"], ["duration_ms", ">", "3000"]]]] }
+    denominator: { event: item_click, agg: uv }
+    numerator_within_denominator: true
+  - key: plays_per_user
+    name: 人均播放（P99 封顶）
+    role: process
+    kind: ratio
+    numerator:   { event: play_start,  agg: pv }
+    denominator: { event: result_view, agg: uv }
+    numerator_within_denominator: true
+    cap: p99_pre
+  - key: noresult_rate
+    name: 无结果率
+    role: guardrail
+    kind: ratio
+    lower_is_better: true
+    numerator:   { event: no_result,   agg: uv }
+    denominator: { event: result_view, agg: uv }
+    numerator_within_denominator: true
+  - key: completion
+    name: 完播率（PV）
+    role: guardrail
+    kind: ratio
+    numerator:   { event: play_end, agg: pv, filters: [["item_duration_ms", ">", "0"], ["duration_ms", ">=", "0.9*item_duration_ms"]] }
+    denominator: { event: play_end, agg: pv, filters: [["item_duration_ms", ">", "0"]] }
+  - key: startup_ms
+    name: 起播耗时 P50 / P90（ms）
+    role: guardrail
+    kind: quantile
+    lower_is_better: true
+    source: { event: play_start, filters: [["duration_ms", ">", "0"]] }
+    column: duration_ms
+    quantiles: [0.5, 0.9]
+
+# 可选：事件 / 列的中文名，指标库选择框里显示（不写就只显示原名）
+labels:
+  item_click: 卡片点击
+  result_view: 结果页加载
+  play_start: 开始播放
+  play_end: 播放结束
+  entry: 入口
+  duration_ms: 时长（毫秒）
+
+notes:
+  funnel_foot: 演示数据为合成数据；口径：结果页事件不剔除任何来源，有效播放 = is_valid 或播放时长 > 3 秒。

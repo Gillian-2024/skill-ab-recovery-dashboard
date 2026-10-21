@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>数据看板</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<aside class="side">
+  <div class="brand"><span id="brandTitle">数据看板</span><small>日常漏斗 · 实验回收</small></div>
+  <nav>
+    <a href="#funnel" data-tab="funnel">日常漏斗</a>
+    <a href="#exp" data-tab="exp">实验回收</a>
+    <a href="#metrics" data-tab="metrics">指标库</a>
+    <a href="#logs" data-tab="logs">任务日志</a>
+  </nav>
+  <div class="side-foot" id="sideFoot"></div>
+</aside>
+
+<main>
+  <div id="health"></div>
+  <!-- 日常漏斗 -->
+  <section id="tab-funnel" class="tab">
+    <header class="bar">
+      <div><h1 id="fTitle">日常漏斗</h1><div class="ctx" id="fCtx"></div></div>
+      <div class="controls">
+        <div class="seg" id="scopeSeg"></div>
+        <div class="fcountry" id="fSub" hidden></div>
+        <input type="date" id="fStart" aria-label="开始日"> <span class="muted">至</span> <input type="date" id="fEnd" aria-label="结束日">
+        <div class="seg" id="tierSeg"></div>
+        <button class="btn" id="fRefresh">从数据源刷新</button>
+      </div>
+    </header>
+    <div id="fNotice"></div>
+    <div class="card-h"><h2>核心指标</h2><button type="button" class="btn copy" data-copy="tiles">复制表格</button></div>
+    <div class="tiles" id="fTiles"></div>
+    <div class="card"><div class="card-h"><h2>UV 转化漏斗（窗口日均）</h2><button type="button" class="btn copy" data-copy="flow">复制表格</button></div>
+      <div id="fFlow"></div></div>
+    <div class="card"><div class="card-h"><h2>漏斗条形图</h2><button type="button" class="btn copy" data-copy="steps">复制表格</button></div><div id="fSteps"></div></div>
+    <div class="card"><div class="card-h"><h2>逐日趋势</h2><button type="button" class="btn copy" data-copy="trend">复制表格</button></div>
+      <div class="seg small" id="trendSeg"></div>
+      <div id="fTrend" class="chart"></div>
+      <p class="foot" id="trendFoot"></p>
+    </div>
+    <div class="card" id="bdCard" hidden><div class="card-h"><h2 id="bdTitle">分桶转化</h2><button type="button" class="btn copy" data-copy="bd">复制表格</button></div><div id="fBd" class="chart"></div></div>
+    <div class="card"><div class="card-h"><h2>逐日转化（当前档）</h2><button type="button" class="btn copy" data-copy="flowDaily">复制表格</button></div><div class="scroll" id="fFlowDaily"></div>
+      <details class="trend"><summary>原始 UV（各步独立去重，相邻两步不可相除）</summary>
+        <div class="card-h"><span></span><button type="button" class="btn copy" data-copy="daily">复制表格</button></div><div class="scroll" id="fTable"></div></details></div>
+    <p class="foot" id="funnelFoot"></p>
+  </section>
+
+  <!-- 实验 -->
+  <section id="tab-exp" class="tab" hidden>
+    <header class="bar"><h1>实验回收</h1><button class="btn primary" id="newExpBtn">新建回收</button></header>
+    <div class="card" id="newExp" hidden>
+      <h2 id="expFormTitle">新建回收</h2>
+      <form id="expForm" class="form">
+        <label>实验名<input name="name" required placeholder="例：结果页排序 v2"></label>
+        <label>范围<select name="scope" id="expScope"></select></label>
+        <div class="lbl-box" id="subBox" hidden><span id="subLbl">细分</span>
+          <details class="dd" id="subDD">
+            <summary id="subSum">全部</summary>
+            <div class="dd-pop">
+              <input type="search" id="subQ" placeholder="搜代码或名称">
+              <div class="dd-acts"><button type="button" class="btn copy" id="subClr">清空 = 不细分</button></div>
+              <div id="subList" class="dd-list"></div>
+            </div>
+          </details>
+          <small id="subHint"></small>
+        </div>
+        <label>上线日<input type="date" name="launch"><small id="launchHint">实验配置生效当天；P99 封顶取这天之前几天。留空 = 开窗日</small></label>
+        <label>开窗日<input type="date" name="start" required><small>读数从这天算起（可晚于上线日，跳过放量期）</small></label>
+        <label>结束日<input type="date" name="end"><small>留空 = 昨天；结束日前每日自动续跑</small></label>
+        <fieldset class="full"><legend>分组（角色必须手选；流量占比用于分流检查，均分就都填 1）</legend>
+          <div id="grpRows"></div>
+          <button type="button" class="btn ghost" id="addGrp">+ 加一组</button>
+        </fieldset>
+        <fieldset class="full"><legend>指标 <button type="button" class="btn copy" id="dkAll" title="勾选的指标全部 By天 / 全部取消">By天 全选</button></legend><div id="expMetrics" class="mk-grid"></div><small class="muted">勾「By天」= 除全窗口读数外，再按天出趋势；By天 在全窗口结果出来后补算，不挡读数。</small></fieldset>
+        <div class="full"><button class="btn primary" type="submit" id="expSubmit">提交并跑数</button> <button class="btn" type="button" id="expCancel">取消</button> <span id="expMsg" class="muted"></span>
+          <p class="foot" id="expEditHint" hidden>只加指标 / 只加 By天：保留已出结果，只补算新增的部分。改了范围、细分、分组或日期（含上线日）：口径变了，整个实验重跑。去掉的指标会连同结果一起删除。</p></div>
+      </form>
+    </div>
+    <div class="exp-layout">
+      <div class="card list" id="expList"></div>
+      <div class="card" id="expDetail"><p class="muted">选一个实验，或新建回收。</p></div>
+    </div>
+  </section>
+
+  <!-- 指标库 -->
+  <section id="tab-metrics" class="tab" hidden>
+    <header class="bar"><h1>指标库</h1></header>
+    <div class="grid2">
+      <div class="card"><div class="card-h"><h2>已有指标</h2><button type="button" class="btn copy" data-copy="metrics">复制表格</button></div><div id="metricList"></div></div>
+      <div class="card"><h2 id="mTitle">自定义指标</h2>
+        <form id="mForm" class="form">
+          <label>key<input name="key" required placeholder="top_ctr"></label>
+          <label>名称<input name="name" required placeholder="Top 卡片 CTR"></label>
+          <label>类型<select name="kind"><option value="ratio">比率（分子 ÷ 分母）</option><option value="quantile">分位数</option></select></label>
+          <label>角色<select name="role"><option value="process">过程</option><option value="north_star">北极星</option><option value="guardrail">护栏</option></select></label>
+          <div class="full ratio-only" id="numBox"></div>
+          <div class="full ratio-only" id="denBox"></div>
+          <div class="full quant-only" id="srcBox" hidden></div>
+          <div class="lbl-box quant-only" hidden>分位数列<div id="qCol"></div></div>
+          <label class="quant-only" hidden>分位点<input name="quantiles" value="0.5,0.9"></label>
+          <div class="full ratio-only checks">
+            <label><input type="checkbox" name="within" checked> 分子只算分母里的设备</label>
+            <label><input type="checkbox" name="cap"> 分子按上线前单设备单天 P99 封顶</label>
+            <label><input type="checkbox" name="lower"> 越低越好</label>
+          </div>
+          <label class="full">备注<input name="note"></label>
+          <div class="full"><button type="button" class="btn" id="mPreview">生成 SQL 预览</button>
+            <button class="btn primary" type="submit" id="mSubmit">保存</button>
+            <button class="btn" type="button" id="mCancel" hidden>取消编辑</button>
+            <button class="btn" type="button" id="mRestore" hidden>恢复预置</button> <span id="mMsg" class="muted"></span></div>
+        </form>
+        <pre id="mSql" class="sql" hidden></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- 日志 -->
+  <section id="tab-logs" class="tab" hidden>
+    <header class="bar"><h1>任务日志</h1><span class="muted" id="schedInfo"></span></header>
+    <div class="card"><div id="jobList"></div></div>
+  </section>
+</main>
+
+<div id="tip" class="tip" hidden></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
