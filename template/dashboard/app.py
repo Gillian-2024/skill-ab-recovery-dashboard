@@ -296,7 +296,7 @@ def exp_get(eid):
     e = store.experiment(eid)
     if not e:
         return jsonify(error="不存在"), 404
-    e["view"] = jobs.experiment_view(e)
+    e["view"] = jobs.experiment_view(e, request.args.get("base") or None)
     e.pop("results", None)
     return jsonify(e)
 
@@ -314,7 +314,7 @@ def exp_rerun(eid):
         miss_m = [k for k in e["metric_keys"] if k in mm and k not in have]
         miss_d = [k for k in e.get("daily_keys") or [] if k + "@day" not in have]
         miss_c = [k for k in ratio for c, _ in jobs.cum_cutoffs(int(e["start"]), int(e["last_end"])) if "%s@c%d" % (k, c) not in have]
-        if miss_m or miss_d or miss_c:
+        if miss_m or miss_d or miss_c or (ratio and "@dist" not in have):
             return jsonify(mode="incremental", job_id=jobs.submit("experiment", {"exp_id": eid, "only": miss_m, "only_daily": miss_d}))
     return jsonify(mode="full", job_id=jobs.submit("experiment", {"exp_id": eid}))
 

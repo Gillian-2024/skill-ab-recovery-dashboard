@@ -512,11 +512,8 @@ def _dd_sql(scope, gids, d0, d1, metrics, caps, subs):
       WHERE {hits} > 0"""
 
 
-def experiment_ratio_sql(scope, gids, d0, d1, metrics, caps, subs=None):
-    """全窗口 / 前 N 天累计：设备在窗口内（只看带组号的设备-天）取并集；同一设备跨组 → X 剔除。每组一行充分统计量。
-    UV 分子 + 分子只算分母设备：窗口内有过分子 × 窗口内有过分母（不要求同一天）。"""
-    dd = _dd_sql(scope, gids, d0, d1, metrics, caps, subs)
-    grp, _ = _grp_case(gids, "a")
+def _roll(metrics, caps):
+    """设备-天 → 设备（窗口内并集）的取值列。"""
     roll = []
     for m in metrics:
         k = m["key"]
@@ -528,21 +525,61 @@ def experiment_ratio_sql(scope, gids, d0, d1, metrics, caps, subs=None):
             roll.append("%s(xd_%s) AS x_%s, %s(y_%s) AS y_%s" % ("MAX" if uv_num else "SUM", k, k, den, k, k))
         if m["def"].get("device_scope"):
             roll.append("MAX(s_%s) AS s_%s" % (k, k))
+    return roll
+
+
+def _dev_sql(scope, gids, d0, d1, metrics, caps, subs, first=False):
+    """设备层：每设备一行 grp + xx_k / yy_k；全窗口比率与分布共用同一并集口径。first = 带上首次带组号的日期。"""
+    dd = _dd_sql(scope, gids, d0, d1, metrics, caps, subs)
+    grp, _ = _grp_case(gids, "a")
     aflags = ", ".join("MAX(f%d) AS a%d" % (i, i) for i in range(len(gids)))
     return f"""
-SELECT grp, COUNT(*) AS n, {", ".join(_stats_cols(metrics))}
-FROM (
-  SELECT grp, {", ".join(_adj(metrics, caps))}
+  SELECT grp, {"first_date, " if first else ""}{", ".join(_adj(metrics, caps))}
   FROM (
     SELECT {grp} AS grp, v.*
     FROM (
-      SELECT u, {aflags}, {", ".join(roll)}
+      SELECT u, {"MIN(dd) AS first_date, " if first else ""}{aflags}, {", ".join(_roll(metrics, caps))}
       FROM ({dd}
       ) dd
       GROUP BY u
     ) v
   ) g
-  WHERE grp IS NOT NULL
+  WHERE grp IS NOT NULL"""
+
+
+def experiment_ratio_sql(scope, gids, d0, d1, metrics, caps, subs=None):
+    """全窗口 / 前 N 天累计：设备在窗口内（只看带组号的设备-天）取并集；同一设备跨组 → X 剔除。每组一行充分统计量。
+    UV 分子 + 分子只算分母设备：窗口内有过分子 × 窗口内有过分母（不要求同一天）。"""
+    return f"""
+SELECT grp, COUNT(*) AS n, {", ".join(_stats_cols(metrics))}
+FROM ({_dev_sql(scope, gids, d0, d1, metrics, caps, subs)}
+) a
+GROUP BY grp"""
+
+
+DIST_Q = (0.05, 0.25, 0.5, 0.75, 0.95)
+
+
+def experiment_dist_sql(scope, gids, d0, d1, metrics, caps, subs, dist_keys, days):
+    """分布 + 进组趋势，一次扫描，每组一行（只出聚合）。
+    metrics = 实验全部比率指标（设备集合与全窗口比率一致）；
+    分布：dist_keys 里的指标，每设备取值 = 分子 ÷ 分母（同一并集、同一 P99 封顶），只看分母 > 0 的设备，出 P5/P25/P50/P75/P95 + 设备均值；
+    进组：e_<日期> = 窗口内首次带组号是这天的设备数（跨组 → X 剔除），累计到窗口末 = 分流检查的各组设备数。"""
+    try:
+        pct_fn("v", 0.5)
+        has_q = True
+    except MetricError:     # 没有分位数函数的方言（mysql）：只出均值和进组
+        has_q = False
+    cols = []
+    for k in dist_keys:
+        v = "CASE WHEN yy_%s > 0 THEN (xx_%s * 1.0) / yy_%s END" % (k, k, k)
+        if has_q:
+            cols += ["%s AS q%d_%s" % (pct_fn(v, q), i, k) for i, q in enumerate(DIST_Q)]
+        cols.append("AVG(%s) AS avg_%s, SUM(CASE WHEN yy_%s > 0 THEN 1 ELSE 0 END) AS n_%s" % (v, k, k, k))
+    cols += ["SUM(CASE WHEN first_date = %s THEN 1 ELSE 0 END) AS e_%d" % (dlit(d), int(d)) for d in days]
+    return f"""
+SELECT grp, COUNT(*) AS n, {", ".join(cols)}
+FROM ({_dev_sql(scope, gids, d0, d1, metrics, caps, subs, first=True)}
 ) a
 GROUP BY grp"""
 

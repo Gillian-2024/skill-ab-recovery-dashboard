@@ -124,6 +124,28 @@ def _kind(m):
     return m.get("kind", "ratio")
 
 
+def dist_keys(mm, keys):
+    """出分布箱型图的指标：人均类（分母按设备 UV、分子是次数 / 求和），每设备取值才有分布。"""
+    return [k for k in keys if k in mm and _kind(mm[k]) == "ratio"
+            and mm[k]["numerator"].get("agg", "uv") != "uv" and mm[k]["denominator"].get("agg", "uv") == "uv"]
+
+
+def _run_dist(src, e, mm, gids, subs, d0, d1, caps):
+    """设备集合与全窗口比率一致（同一批指标拼认组事件），所以各组进组累计 = 分流检查的设备数。"""
+    ratio = [{"key": k, "name": mm[k]["name"], "def": mm[k]} for k in e["metric_keys"] if k in mm and _kind(mm[k]) == "ratio"]
+    dk = dist_keys(mm, e["metric_keys"])
+    days = list(days_between(d0, d1))
+    rows = [_lower(r) for r in src.dicts(sqlgen.experiment_dist_sql(e["scope"], gids, d0, d1, ratio, caps, subs, dk, days), "分布 / 进组趋势")]
+    num = lambda v: float(v) if v is not None else None
+    out = {}
+    for r in rows:
+        out[str(r["grp"])] = {
+            "metrics": {k: {"q": [num(r.get("q%d_%s" % (i, k))) for i in range(len(sqlgen.DIST_Q))],
+                            "avg": num(r.get("avg_%s" % k)), "n": int(r.get("n_%s" % k) or 0)} for k in dk},
+            "entry": {str(d): int(r.get("e_%d" % d) or 0) for d in days}}
+    store.save_exp_results(e["id"], "@dist", out, d1)
+
+
 def run_experiment(jid, p):
     log = lambda s: store.job_log(jid, s)
     e = store.experiment(int(p["exp_id"]))
@@ -180,7 +202,12 @@ def _run_experiment(e, log, only=None, only_daily=None, jid=None):
     # 3) 慢的都不挡全窗口读数：累计行 / By天 / 分位数排一个补算任务在后面
     daily = set(only_daily if incr else e.get("daily_keys") or [])
     dm = [{"key": k, "def": mm[k]} for k in e["metric_keys"] if k in daily and k in mm]
-    pending = ["@cum"] if cum_cutoffs(d0, d1) and any(_kind(mm[k]) == "ratio" for k in e["metric_keys"] if k in mm) else []
+    any_ratio = any(_kind(mm[k]) == "ratio" for k in e["metric_keys"] if k in mm)
+    pending = ["@cum"] if cum_cutoffs(d0, d1) and any_ratio else []
+    # 分布 + 进组趋势：窗口变了 / 新增比率指标 / 还没算过 → 重算（只读数可视化用，不进判读）
+    have = {r["metric_key"] for r in e.get("results") or []}
+    if any_ratio and (not incr or any(_kind(m["def"]) == "ratio" for m in metrics) or "@dist" not in have):
+        pending.append("@dist")
     pending += [m["key"] + "@day" for m in dm if _kind(m["def"]) == "ratio"]
     pending += [m["key"] for m in metrics if _kind(m["def"]) == "quantile"]
     pending += [m["key"] + "@day" for m in dm if _kind(m["def"]) == "quantile"]
@@ -214,7 +241,7 @@ def run_exp_followup(jid, p):
     gids = [g["id"] for g in e["groups"]]
     subs = e.get("subs") or []
     d0, d1 = int(e["start"]), int(p["run_end"])
-    pending = [k for k in e["pending"] if k == "@cum" or k.split("@")[0] in mm]
+    pending = [k for k in e["pending"] if k in ("@cum", "@dist") or k.split("@")[0] in mm]
     caps = dict(e.get("caps") or {})
     partial = []
 
@@ -240,6 +267,13 @@ def run_exp_followup(jid, p):
                     partial.append("前 N 天累计：%s" % str(ex)[:200])
                     log("⚠ 前 N 天累计失败，其余照常：%s" % ex)
                 done(["@cum"])
+            if "@dist" in pending:
+                try:
+                    _run_dist(src, e, mm, gids, subs, d0, d1, caps)
+                except Exception as ex:
+                    partial.append("分布 / 进组趋势：%s" % str(ex)[:200])
+                    log("⚠ 分布 / 进组趋势失败，其余照常：%s" % ex)
+                done(["@dist"])
             rk = [k for k in pending if k.endswith("@day") and _kind(mm[k[:-4]]) == "ratio"]
             if rk:
                 ms = [{"key": k[:-4], "name": mm[k[:-4]]["name"], "def": mm[k[:-4]]} for k in rk]
@@ -344,10 +378,12 @@ def _tables(e, mm, res, ctrl, trts):
     return out
 
 
-def experiment_view(e):
+def experiment_view(e, base=None):
+    """base = 临时当基准的组（只换比较对象，统计口径不变；默认 = 对照组）。"""
     mm = store.metric_map()
-    ctrl = [g["id"] for g in e["groups"] if g["role"] == "control"]
-    trts = [g["id"] for g in e["groups"] if g["role"] != "control"]
+    ids = [g["id"] for g in e["groups"]]
+    ctrl = [base] if base in ids else [g["id"] for g in e["groups"] if g["role"] == "control"]
+    trts = [i for i in ids if i not in ctrl]
     res = {}
     for r in e["results"]:
         res.setdefault(r["metric_key"], {})[r["grp"]] = r["payload"]
@@ -364,7 +400,13 @@ def experiment_view(e):
         chi, p = stats.srm(obs, w)
         srm = {"counts": dict(zip(ids, obs)), "conflict": counts.get("X", 0), "chi2": chi, "p": p}
     tables = _tables(e, mm, res, ctrl, trts)
-    return {"srm": srm, "tables": tables, "summary": summary(e, srm, tables, trts)}
+    # 结论提要始终按真对照组出，不随临时基准变
+    c0 = [g["id"] for g in e["groups"] if g["role"] == "control"]
+    t0 = [i for i in ids if i not in c0]
+    st = tables if c0 == ctrl else _tables(e, mm, res, c0, t0)
+    dist = (res.get("@dist") or {}).get
+    return {"srm": srm, "tables": tables, "summary": summary(e, srm, st, t0), "base": ctrl[0] if ctrl else None, "trts": trts,
+            "dist": {g: dist(g) for g in ids if dist(g)} or None, "dist_keys": dist_keys(mm, e["metric_keys"])}
 
 
 def _fmt_delta(t, c):
@@ -412,7 +454,8 @@ def stage_of(e, today=None):
 def summary(e, srm, tables, trts):
     """结论提要：按实验节点挑累计行、固定规则出句子，不给采纳建议；逐日同向天数不作判据。"""
     cfg = C.cfg["experiment"]
-    if e.get("status") in ("queued", "running") or e.get("pending"):
+    # 分布 / 进组趋势只做可视化、不进判读，不挡结论
+    if e.get("status") in ("queued", "running") or [k for k in e.get("pending") or [] if k != "@dist"]:
         return {"state": "wait", "text": "待全窗口跑完再出结论"}
     if e.get("status") == "failed" or e.get("error"):
         return {"state": "wait", "text": "有指标跑数失败，补齐后再出结论"}

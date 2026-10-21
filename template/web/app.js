@@ -257,7 +257,8 @@ function renderTrend(days) {
   $$("#trendSeg button").forEach(b => b.onclick = () => { S.trend = b.dataset.k; renderTrend(days); });
   const cfg = T[S.trend] || T[S.trend = "rates"], fl = FUNNEL.flow;
   const series = cfg.series.map(([name, f], i) => ({ name, color: `var(--s${i + 1})`, pts: days.map(d => fl[d] ? f(fl[d], S.tier) : null) })).filter(se => se.pts.some(v => v != null));
-  lineChart($("#fTrend"), days, series, cfg.fmt);
+  lineChart($("#fTrend"), days, series, cfg.fmt, false, null, { key: "fTrend:" + S.trend,
+    title: `${viewText()} · ${tierLabel(S.tier)} · 逐日趋势（${cfg.label}，${toISO(days[0])} ~ ${toISO(days[days.length - 1])}）` });
   $("#trendFoot").textContent = META.kpis[0].den ? `「${META.kpis[0].name}」为独立去重 UV 口径（与实验回收一致）；其余转化为设备-天包含式。` : "";
   COPY.trend = () => {
     const cols = Object.entries(T).flatMap(([k, c]) => c.series.map(([name, f]) => [name + (k === "uv" ? " UV" : ""), f, k === "rates" ? pct : fmt]));
@@ -266,37 +267,136 @@ function renderTrend(days) {
   };
 }
 
-function lineChart(el, days, series, yfmt, fit) {
-  const W = Math.max(el.clientWidth || 560, 320), H = 240, L = 52, R = 22, T = 12, B = 26;
-  const all = series.flatMap(s => s.pts).filter(v => v != null);
-  if (!all.length) { el.innerHTML = `<p class="muted">无数据</p>`; return; }
-  // fit：y 轴贴合数据范围（实验 By天 组间差常 <1pp，从 0 起画会压成一条线）
-  const lo = Math.min(...all), hi = Math.max(...all), pad = (hi - lo) * 0.2 || Math.abs(hi) * 0.05 || 1;
-  const ymin = fit ? Math.max(0, lo - pad) : 0, ymax = fit ? hi + pad : niceMax(hi), x = i => L + (days.length === 1 ? (W - L - R) / 2 : i * (W - L - R) / (days.length - 1));
-  const y = v => T + (H - T - B) * (1 - (v - ymin) / (ymax - ymin));
-  const ticks = [0, .25, .5, .75, 1].map(t => ymin + t * (ymax - ymin));
-  const every = Math.ceil(days.length / Math.max(1, Math.floor((W - L - R) / 56)));
-  let s = `<svg width="${W}" height="${H}" role="img" aria-label="逐日趋势">`;
-  s += ticks.map(t => `<line class="gl" x1="${L}" x2="${W - R}" y1="${y(t)}" y2="${y(t)}"/><text x="${L - 6}" y="${y(t) + 4}" text-anchor="end">${yfmt(t)}</text>`).join("");
-  s += `<line class="ax" x1="${L}" x2="${W - R}" y1="${y(ymin)}" y2="${y(ymin)}"/>`;
-  s += days.map((d, i) => i % every ? "" : `<text x="${x(i)}" y="${H - 8}" text-anchor="middle">${String(d).slice(4, 6)}-${String(d).slice(6)}</text>`).join("");
-  for (const se of series) {
-    let path = "", pen = false;
-    se.pts.forEach((v, i) => { if (v == null) { pen = false; return; } path += (pen ? "L" : "M") + x(i).toFixed(1) + "," + y(v).toFixed(1); pen = true; });
-    s += `<path class="line" d="${path}" style="stroke:${se.color}"/>`;
-    if (days.length <= 14) s += se.pts.map((v, i) => v == null ? "" : `<circle cx="${x(i)}" cy="${y(v)}" r="3.5" fill="${se.color}" stroke="var(--card)" stroke-width="2"/>`).join("");
+// ─────────── 图表公共：图例开关 + 复制图片 ───────────
+// HIDE[图表键] = 被图例关掉的线名；重绘（换档 / 轮询刷新）时保留
+const HIDE = {};
+const chartTop = legend => `<div class="chart-top"><div class="legend">${legend}</div>` +
+  `<button type="button" class="btn copy" data-img title="复制成 PNG，可直接粘到在线文档">复制图片</button></div>`;
+const staticLegend = items => items.map(([c, t, k]) => `<span class="lg static"><i class="${k || ""}" style="background:${c}"></i>${esc(t)}</span>`).join("");
+
+// tipHead(i)：悬停浮层标题（默认 = 日期）
+// series[i] = { name, color, pts, band?: [下界[], 上界[]] }；opt = { key（图例开关状态的键，默认 = 容器 id）, zero（画 0 参考线）, title（复制图片的标题）, h }
+function lineChart(el, days, series, yfmt, fit, tipHead, opt = {}) {
+  el._lc = [days, series, yfmt, fit, tipHead, opt];
+  if (opt.title) el.dataset.title = opt.title;
+  if (!series.some(se => se.pts.some(v => v != null))) { el.innerHTML = `<p class="muted">无数据</p>`; return; }
+  const hid = HIDE[opt.key || el.id] ||= new Set(), vis = series.filter(se => !hid.has(se.name));
+  const W = Math.max(el.clientWidth || 560, 320), H = opt.h || 240, L = 58, R = 22, T = 12, B = 26;
+  const all = vis.flatMap(se => [...se.pts, ...(se.band ? se.band.flat() : [])]).filter(v => v != null && isFinite(v));
+  if (opt.zero && all.length) all.push(0);
+  const legend = series.map((se, i) => { const off = hid.has(se.name);
+    return `<button type="button" class="lg${off ? " off" : ""}" data-i="${i}" aria-pressed="${!off}" title="点击${off ? "显示" : "隐藏"}这条线"><i style="background:${se.color}"></i>${esc(se.name)}</button>`; }).join("");
+  let s = `<svg width="${W}" height="${H}" role="img" aria-label="${esc(opt.title || "趋势图")}">`;
+  if (!all.length) s += `<text x="${W / 2}" y="${H / 2}" text-anchor="middle">线都关掉了，点上方图例重新显示</text></svg>`;
+  else {
+    // fit：y 轴贴合数据范围（实验 By天 组间差常 <1pp，从 0 起画会压成一条线）
+    const lo = Math.min(...all), hi = Math.max(...all), pad = (hi - lo) * 0.2 || Math.abs(hi) * 0.05 || 0.01;
+    // zero：差值图以 0 为中轴对称，0 线落在刻度上
+    const zm = opt.zero ? Math.max(Math.abs(lo), Math.abs(hi)) * 1.1 || 0.01 : 0;
+    const ymin = opt.zero ? -zm : fit ? (lo >= 0 ? Math.max(0, lo - pad) : lo - pad) : Math.min(0, lo), ymax = opt.zero ? zm : fit ? hi + pad : niceMax(hi);
+    const x = i => L + (days.length === 1 ? (W - L - R) / 2 : i * (W - L - R) / (days.length - 1));
+    const y = v => T + (H - T - B) * (1 - (v - ymin) / (ymax - ymin));
+    const ticks = [0, .25, .5, .75, 1].map(t => ymin + t * (ymax - ymin));
+    const every = Math.ceil(days.length / Math.max(1, Math.floor((W - L - R) / 56)));
+    s += ticks.map(t => `<line class="gl" x1="${L}" x2="${W - R}" y1="${y(t)}" y2="${y(t)}"/><text x="${L - 6}" y="${y(t) + 4}" text-anchor="end">${yfmt(t)}</text>`).join("");
+    s += `<line class="ax" x1="${L}" x2="${W - R}" y1="${y(ymin)}" y2="${y(ymin)}"/>`;
+    if (opt.zero && ymin < 0 && ymax > 0) s += `<line class="zero" x1="${L}" x2="${W - R}" y1="${y(0)}" y2="${y(0)}"/>`;
+    s += days.map((d, i) => i % every ? "" : `<text x="${x(i)}" y="${H - 8}" text-anchor="middle">${String(d).slice(4, 6)}-${String(d).slice(6)}</text>`).join("");
+    // 区间带先画，线压在上面
+    for (const se of vis.filter(se => se.band)) {
+      const [blo, bhi] = se.band;
+      let d = "", run = [];
+      const flush = () => { if (run.length > 1) d += "M" + run.map(i => x(i).toFixed(1) + "," + y(bhi[i]).toFixed(1)).join("L") + "L" +
+        [...run].reverse().map(i => x(i).toFixed(1) + "," + y(blo[i]).toFixed(1)).join("L") + "Z"; run = []; };
+      blo.forEach((v, i) => v == null || bhi[i] == null ? flush() : run.push(i)); flush();
+      s += `<path class="band" d="${d}" style="fill:${se.color}"/>`;
+      if (days.length <= 14) s += blo.map((v, i) => v == null || bhi[i] == null ? "" : `<line class="whisk" x1="${x(i)}" x2="${x(i)}" y1="${y(bhi[i])}" y2="${y(v)}" style="stroke:${se.color}"/>`).join("");
+    }
+    for (const se of vis) {
+      let path = "", pen = false;
+      se.pts.forEach((v, i) => { if (v == null) { pen = false; return; } path += (pen ? "L" : "M") + x(i).toFixed(1) + "," + y(v).toFixed(1); pen = true; });
+      s += `<path class="line" d="${path}" style="stroke:${se.color}"/>`;
+      if (days.length <= 14) s += se.pts.map((v, i) => v == null ? "" : `<circle cx="${x(i)}" cy="${y(v)}" r="3.5" fill="${se.color}" stroke="var(--card)" stroke-width="2"/>`).join("");
+    }
+    s += `<line class="cross" y1="${T}" y2="${H - B}" visibility="hidden"/><rect x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}" fill="transparent" class="hit"/></svg>`;
+    el.innerHTML = chartTop(legend) + s;
+    const svg = el.querySelector("svg"), xh = svg.querySelector(".cross"), hit = svg.querySelector(".hit");
+    const band = (se, i) => se.band && se.band[0][i] != null ? ` <span class="muted">[${yfmt(se.band[0][i])}, ${yfmt(se.band[1][i])}]</span>` : "";
+    hit.addEventListener("mousemove", ev => {
+      const px = ev.clientX - svg.getBoundingClientRect().left;
+      const i = Math.max(0, Math.min(days.length - 1, Math.round((px - L) / ((W - L - R) / Math.max(1, days.length - 1)))));
+      xh.setAttribute("x1", x(i)); xh.setAttribute("x2", x(i)); xh.setAttribute("visibility", "visible");
+      showTip((tipHead ? tipHead(i) : `<b>${toISO(days[i])}</b>`) + "<br>" + vis.map(se => `<span class="sw" style="background:${se.color}"></span>${esc(se.name)}：${yfmt(se.pts[i])}${band(se, i)}`).join("<br>"), ev);
+    });
+    hit.addEventListener("mouseleave", () => { xh.setAttribute("visibility", "hidden"); hideTip(); });
   }
-  s += `<line class="cross" id="xh" y1="${T}" y2="${H - B}" visibility="hidden"/><rect x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}" fill="transparent" class="hit"/></svg>`;
-  el.innerHTML = `<div class="legend">${series.map(se => `<span><i style="background:${se.color}"></i>${esc(se.name)}</span>`).join("")}</div>` + s;
-  const svg = el.querySelector("svg"), xh = svg.querySelector("#xh");
-  svg.querySelector(".hit").addEventListener("mousemove", ev => {
-    const bx = svg.getBoundingClientRect().left, px = ev.clientX - bx;
-    const i = Math.max(0, Math.min(days.length - 1, Math.round((px - L) / ((W - L - R) / Math.max(1, days.length - 1)))));
-    xh.setAttribute("x1", x(i)); xh.setAttribute("x2", x(i)); xh.setAttribute("visibility", "visible");
-    showTip(`<b>${toISO(days[i])}</b><br>` + series.map(se => `<span class="sw" style="background:${se.color}"></span>${esc(se.name)}：${yfmt(se.pts[i])}`).join("<br>"), ev);
+  if (!all.length) el.innerHTML = chartTop(legend) + s;
+  $$(".legend .lg[data-i]", el).forEach(b => b.onclick = () => {
+    const n = series[+b.dataset.i].name;
+    hid.has(n) ? hid.delete(n) : hid.add(n);
+    lineChart(el, ...el._lc);
   });
-  svg.querySelector(".hit").addEventListener("mouseleave", () => { xh.setAttribute("visibility", "hidden"); hideTip(); });
 }
+
+// 复制图片：把图表 SVG（含标题、显示中的图例项）栅格化成 2 倍 PNG 写进剪贴板，在线文档里直接粘贴
+const IMG_PROPS = ["fill", "fill-opacity", "stroke", "stroke-width", "stroke-dasharray", "stroke-opacity", "stroke-linecap", "opacity",
+  "font-size", "font-weight", "font-family", "visibility"];
+function chartPng(box) {
+  const svg = box && box.querySelector("svg");
+  if (!svg) return null;
+  const card = box.closest(".card, section");
+  const title = box.dataset.title || (card && card.querySelector("h2") ? card.querySelector("h2").textContent.trim() : "图表");
+  const W = +svg.getAttribute("width"), H = +svg.getAttribute("height");
+  // 计算样式（CSS 变量、类样式）逐个写成内联，脱离页面后颜色不丢
+  const clone = svg.cloneNode(true), src = [svg, ...svg.querySelectorAll("*")], dst = [clone, ...clone.querySelectorAll("*")];
+  src.forEach((n, i) => { const cs = getComputedStyle(n); IMG_PROPS.forEach(p => dst[i].style.setProperty(p, cs.getPropertyValue(p))); });
+  clone.querySelectorAll(".hit, .cross").forEach(n => n.remove());
+  const bs = getComputedStyle(document.body), bgc = getComputedStyle(box.closest(".card") || document.body).backgroundColor;
+  const bg = !bgc || bgc === "rgba(0, 0, 0, 0)" ? "#ffffff" : bgc, ink = bs.color;
+  const tw = t => [...t].reduce((a, c) => a + (c.charCodeAt(0) > 255 ? 12 : 6.8), 0);
+  const items = $$(".legend .lg:not(.off)", box).map(b => [getComputedStyle(b.querySelector("i")).backgroundColor, b.textContent.trim()]);
+  let lx = 0, ly = 46, head = "";
+  for (const [c, t] of items) {
+    const w = 22 + tw(t) + 18;
+    if (lx && lx + w > W) { lx = 0; ly += 18; }
+    head += `<rect x="${lx}" y="${ly - 8}" width="14" height="4" rx="2" fill="${c}"/><text x="${lx + 20}" y="${ly - 3}" font-size="12" fill="${ink}">${esc(t)}</text>`;
+    lx += w;
+  }
+  const top = items.length ? ly + 12 : 36, OW = W + 32, OH = H + top + 16;
+  const out = `<svg xmlns="http://www.w3.org/2000/svg" width="${OW}" height="${OH}" font-family="${esc(bs.fontFamily)}">` +
+    `<rect width="100%" height="100%" fill="${bg}"/><g transform="translate(16,0)"><text x="0" y="24" font-size="14" font-weight="600" fill="${ink}">${esc(title)}</text>${head}</g>` +
+    `<g transform="translate(16,${top})">${new XMLSerializer().serializeToString(clone)}</g></svg>`;
+  return new Promise((ok, fail) => {
+    const img = new Image();
+    img.onload = () => {
+      const cv = document.createElement("canvas"), k = 2;
+      cv.width = OW * k; cv.height = OH * k;
+      const g = cv.getContext("2d"); g.scale(k, k); g.drawImage(img, 0, 0);
+      cv.toBlob(blob => blob ? ok({ blob, url: cv.toDataURL("image/png"), title }) : fail(new Error("导出失败")), "image/png");
+    };
+    img.onerror = () => fail(new Error("导出失败"));
+    img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(out);
+  });
+}
+function copyChartImage(btn) {
+  const job = chartPng(btn.closest(".chart"));
+  if (!job) { flash(btn, "暂无图", false); return; }
+  // ClipboardItem 直接收 Promise：写剪贴板要在点击当下发起，等图片生成完再写会丢掉用户手势
+  const write = navigator.clipboard && window.ClipboardItem
+    ? navigator.clipboard.write([new ClipboardItem({ "image/png": job.then(x => x.blob) })]) : Promise.reject(new Error("无剪贴板权限"));
+  write.then(() => flash(btn, "已复制图片", true),
+    () => job.then(x => { showImage(x.url, x.title); flash(btn, "右键复制图片", true); }, () => flash(btn, "复制失败", false)));
+}
+// 退路（局域网 http 访问没有剪贴板权限）：弹出图片，右键复制
+function showImage(src, title) {
+  const d = document.createElement("div");
+  d.className = "imgdlg";
+  d.innerHTML = `<div class="imgdlg-box"><div class="card-h"><b>${esc(title)}</b><button type="button" class="btn">关闭</button></div>` +
+    `<p class="muted">浏览器不让直接写剪贴板（局域网 http 访问时常见）：在图片上右键 →「复制图片」，再粘到在线文档。</p><img src="${src}" alt="${esc(title)}"></div>`;
+  d.onclick = ev => { if (ev.target === d || ev.target.closest("button")) d.remove(); };
+  document.body.appendChild(d);
+}
+document.addEventListener("click", ev => { const b = ev.target.closest("[data-img]"); if (b) copyChartImage(b); });
 function niceMax(v) { if (v <= 0) return 1; const p = 10 ** Math.floor(Math.log10(v)); const n = v / p;
   return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * p; }
 
@@ -494,11 +594,14 @@ async function submitExp(ev) {
   } catch (e) { msg.textContent = e.message; }
 }
 
+// BASE[实验 id] = 临时当基准的组（只换比较对象；默认 = 对照组）
+const BASE = {};
+const expUrl = id => `/api/experiments/${id}` + (BASE[id] ? `?base=${encodeURIComponent(BASE[id])}` : "");
 async function openExp(id, quiet) {
   if (EDIT_NOTE && EDIT_NOTE.id !== id) EDIT_NOTE = null;
   CUR_EXP = id;
   $$("#expList .item").forEach(it => it.classList.toggle("on", +it.dataset.id === id));
-  const e = await api(`/api/experiments/${id}`);
+  const e = await api(expUrl(id));
   renderExp(e);
   if ((["queued", "running"].includes(e.status) || (e.pending || []).length) && !quiet) pollExp(id);
 }
@@ -506,7 +609,7 @@ async function pollExp(id) {
   for (;;) {
     await new Promise(r => setTimeout(r, 5000));
     if (CUR_EXP !== id) return;
-    const e = await api(`/api/experiments/${id}`);
+    const e = await api(expUrl(id));
     renderExp(e);
     if (!["queued", "running"].includes(e.status) && !(e.pending || []).length) { loadExpList(); return; }
   }
@@ -541,7 +644,27 @@ function renderExp(e) {
   }
   const lz = e.launch || e.start, pre = d => toISO(addDays(lz, d)).slice(5), N = META.cap_pre_days;
   if (Object.keys(e.caps || {}).length) h += `<p class="foot">P99 封顶（上线日 ${toISO(lz).slice(5)} 之前 ${N} 天 ${pre(-N)}~${pre(-1)}，写死）：${Object.entries(e.caps).map(([k, c]) => esc(metricName(k.replace("@day", ""))) + (k.endsWith("@day") ? "（By天，单设备单天）" : "") + " = " + fmt(c)).join("；")}</p>`;
-  const TB = expTables(e, v.tables || []);
+  // ── 读数可视化：指标卡 → 置信区间总览 → 分布箱型图 → 进组趋势（口径同下方读数表，只换呈现）──
+  const ctrl0 = e.groups.find(g => g.role === "control"), base = e.groups.find(g => g.id === v.base) || ctrl0;
+  const others = e.groups.filter(g => g.id !== base.id), trt = others.find(g => g.id === TRT[e.id]) || others[0];
+  const ratioT = sortTables((v.tables || []).filter(t => t.kind === "ratio" && t.rows.some(r => r.type === "total")));
+  if (ratioT.length) {
+    const gbtn = (id, gs, cur, tag) => `<div class="seg small" id="${id}">${gs.map(g => `<button type="button" data-g="${esc(g.id)}" class="${g.id === cur ? "on" : ""}">${esc(gLab(g))}${tag && g.role === "control" ? "（对照）" : ""}</button>`).join("")}</div>`;
+    h += `<section class="xviz"><div class="card-h"><h2>读数可视化（全窗口累计）</h2>${e.groups.length > 2 ? `<div class="controls"><span class="muted">基准组</span>${gbtn("xBase", e.groups, base.id, true)}</div>` : ""}</div>`;
+    if (base.id !== ctrl0.id) h += `<div class="notice warn"><b>基准已换成 ${esc(gLab(base))}</b>指标卡、区间图、逐日趋势、读数表都按「其他组 vs 该组」比；结论提要和分流检查仍按对照组 ${esc(gLab(ctrl0))}。<button type="button" class="btn" id="xBaseReset">换回对照组</button></div>`;
+    h += `<div class="card-h sub"><h3>指标卡</h3>${others.length > 1 ? gbtn("xTrt", others, trt.id) : `<span class="muted">${esc(gLab(trt))} vs ${esc(gLab(base))}</span>`}</div>`;
+    h += `<div class="xcards">${expCards(ratioT, base, trt)}</div>`;
+    h += `<div class="card-h sub"><h3>置信区间总览</h3></div><div class="chart" id="xForest"></div>
+      <p class="foot">横轴 = 相对变化（实验 ÷ 基准 − 1），所有指标同一刻度；线 = 95% 置信区间，点 = 估计值；灰带 = 可测下限（MDE，α 0.05 / power 0.8）。区间整段离开 0 线 = 显著，再看是否出了灰带：在带内的显著不引用幅度。越低越好的指标（如无结果率）往右是变差、标红。</p>`;
+    const dk = v.dist_keys || [], dpend = (e.pending || []).includes("@dist");
+    if (v.dist) {
+      for (const k of dk) h += `<div class="card-h sub"><h3>分布：${esc(metricName(k))}</h3><button type="button" class="btn copy" data-copy="dist_${k}">复制表格</button></div><div class="chart" id="xBox_${k}"></div><p class="foot" id="xBoxNote_${k}"></p>`;
+      h += `<div class="card-h sub"><h3>进组趋势</h3><div class="seg small" id="xEntrySeg">${[["new", "每天新进组"], ["cum", "累计进组"]].map(([k, l]) => `<button type="button" data-k="${k}" class="${(S.entry || "cum") === k ? "on" : ""}">${l}</button>`).join("")}</div></div>
+        <div class="chart" id="xEntry"></div><p class="foot">设备按窗口内第一次带组号的日期计入（认组口径同读数：当天认组事件带组号；跨组设备剔除）。累计到最后一天 = 上方分流检查的各组设备数。两组曲线应基本重合；某天某组明显偏离 = 那天分流或上报出了问题。</p>`;
+    } else h += `<p class="muted">${dpend ? "分布箱型图 / 进组趋势补算中…" : "分布箱型图 / 进组趋势还没算：点「重跑」只补这部分（不重跑已出结果）。"}</p>`;
+    h += `</section>`;
+  }
+  const TB = expTables(e, v.tables || [], base.id);
   if (TB.overview.rows.length) {
     h += `<div class="card-h"><h2>总览（全窗口累计）</h2><div class="controls"><button type="button" class="btn copy" data-copy="ov">复制表格</button><button type="button" class="btn copy" data-copy="allTables">复制全部表格</button></div></div>`;
     h += tableHTML(TB.overview, "otab");
@@ -550,7 +673,7 @@ function renderExp(e) {
     h += `<section class="mtable"><div class="card-h"><h2>${esc(x.title)}</h2><button type="button" class="btn copy" data-copy="t${i}">复制表格</button></div>`;
     h += `<p class="foot">${esc(x.note)}${x.waits.length ? ` <span class="pill running">补算中：${esc(x.waits.join("、"))}</span>` : ""}</p>`;
     h += x.rows.length ? tableHTML(x, "dtab2") : `<p class="muted">${x.waits.length ? "补算中…" : e.error ? "补算失败（原因见顶部），点「重跑」只补这部分" : "暂无数据"}</p>`;
-    if (x.chart) h += `<details class="trend" data-i="${i}"><summary>趋势图</summary><div class="chart" id="tch${i}"></div></details>`;
+    if (x.chart) h += `<details class="trend" data-i="${i}"><summary>趋势图</summary>${x.src.kind === "ratio" ? `<div class="seg small tmode">${[["diff", "差值 + 95% CI"], ["value", "各组取值"]].map(([k, l]) => `<button type="button" data-k="${k}" class="${(S.tmode || "diff") === k ? "on" : ""}">${l}</button>`).join("")}</div>` : ""}<div class="chart" id="tch${i}"></div></details>`;
     h += `</section>`;
     COPY["t" + i] = () => ({ caption: `${e.name} · ${expScopeText(e)} · ${x.title}`, header: x.header, rows: x.rows });
   });
@@ -560,7 +683,25 @@ function renderExp(e) {
   if (TB.items.length) h += `<p class="foot">判读：p &lt; ${alpha} 为显著，按指标方向标正向 / 负向；标准误按设备聚类（delta method）。Δ：百分比指标为百分点差（pp），数值指标为相对差（%）。
     累计行 = 设备在该时段内取并集（分子、分母不要求同一天），封顶指标用上线前 ${N} 天单设备单天 P99；逐日行单位 = 设备-天。MDE = 本窗口在 α ${alpha} / power 0.8 下可测出的最小差异。看板只给数据，采纳与否由人判断。</p>`;
   $("#expDetail").innerHTML = h;
-  $$("#expDetail details.trend").forEach(d => d.addEventListener("toggle", () => { if (d.open) drawTrend(e, TB.items[+d.dataset.i], "tch" + d.dataset.i); }));
+  const draw = d => drawTrend(e, TB.items[+d.dataset.i], "tch" + d.dataset.i, base.id);
+  $$("#expDetail details.trend").forEach(d => d.addEventListener("toggle", () => { if (d.open) draw(d); }));
+  $$("#expDetail .tmode button").forEach(b => b.onclick = () => {
+    S.tmode = b.dataset.k;
+    $$("#expDetail .tmode button").forEach(x => x.classList.toggle("on", x.dataset.k === S.tmode));
+    $$("#expDetail details.trend[open]").forEach(draw);
+  });
+  if (ratioT.length) {
+    forest($("#xForest"), e, ratioT, base);
+    if (v.dist) {
+      for (const k of v.dist_keys || []) boxPlot($("#xBox_" + k), $("#xBoxNote_" + k), e, k, v.dist, base);
+      entryChart($("#xEntry"), e, v.dist);
+      $$("#xEntrySeg button").forEach(b => b.onclick = () => { S.entry = b.dataset.k; $$("#xEntrySeg button").forEach(x => x.classList.toggle("on", x === b)); entryChart($("#xEntry"), e, v.dist); });
+    }
+    const setBase = id => { if (id === ctrl0.id) delete BASE[e.id]; else BASE[e.id] = id; openExp(e.id, true); };
+    $$("#xBase button").forEach(b => b.onclick = () => setBase(b.dataset.g));
+    if ($("#xBaseReset")) $("#xBaseReset").onclick = () => setBase(ctrl0.id);
+    $$("#xTrt button").forEach(b => b.onclick = () => { TRT[e.id] = b.dataset.g; renderExp(e); });
+  }
   const busy = ["queued", "running"].includes(e.status) || (e.pending || []).length;
   $("#editExp").disabled = !!busy; $("#editExp").title = busy ? "跑完再编辑" : "加指标 / 加 By天 只补算新增部分";
   $("#editExp").onclick = () => openNewExp(null, e);
@@ -572,8 +713,9 @@ function renderExp(e) {
 
 // ─────────── 实验读数表：纵向 逐日 → 前 N 天累计 → 累计；横向 对照 | 实验 | Δ | z | 判读 ───────────
 const sgn = (v, d) => v == null || !isFinite(v) ? "—" : (v >= 0 ? "+" : "") + v.toFixed(d);
-function expTables(e, tables) {
-  const ctrl = e.groups.find(g => g.role === "control"), trts = e.groups.filter(g => g.role !== "control");
+function expTables(e, tables, baseId) {
+  const ctrl = e.groups.find(g => g.id === baseId) || e.groups.find(g => g.role === "control"), trts = e.groups.filter(g => g.id !== ctrl.id);
+  const cname = ctrl.role === "control" ? "对照" : "基准";
   const lab = g => g.label && g.label !== g.id ? `${g.label} ${g.id}` : g.id, multi = trts.length > 1;
   const val = (t, x) => {
     if (t.kind !== "ratio") return x ? x.q.map(v => v == null ? "—" : +v.toPrecision(4)).join(" / ") : "—";
@@ -589,7 +731,7 @@ function expTables(e, tables) {
   const read = r => { const xs = trts.filter(g => r.vs[g.id] && r.vs[g.id].read);
     return { v: xs.length ? xs.map(g => (multi ? lab(g) + " " : "") + r.vs[g.id].read).join("；") : "—", cls: xs.length === 1 ? cls(r.vs[xs[0].id]) : "" }; };
   const items = tables.map(t => {
-    const header = ["日期", `对照 ${lab(ctrl)}`];
+    const header = ["日期", `${cname} ${lab(ctrl)}`];
     for (const g of trts) header.push(`实验 ${lab(g)}`, multi ? `Δ（${g.label || g.id}）` : "Δ", "z");
     header.push("判读");
     const rows = t.rows.map(r => {
@@ -606,7 +748,7 @@ function expTables(e, tables) {
   });
   // 总览：每个指标取「累计」行 + MDE；按 北极星 → 过程 → 护栏 排
   const order = { north_star: 0, process: 1, guardrail: 2 };
-  const oh = ["指标", `对照 ${lab(ctrl)}`];
+  const oh = ["指标", `${cname} ${lab(ctrl)}`];
   for (const g of trts) oh.push(`实验 ${lab(g)}`, multi ? `Δ（${g.label || g.id}）` : "Δ", "z", "MDE");
   oh.push("判读");
   const orows = [];
@@ -625,14 +767,146 @@ function expTables(e, tables) {
   }
   return { items, overview: { header: oh, rows: orows } };
 }
-function drawTrend(e, x, id) {
-  const el = $("#" + id), t = x.src, ctrl = e.groups.find(g => g.role === "control"), trts = e.groups.filter(g => g.role !== "control");
+// 组的颜色跟着组走（按实验里登记的顺序），换基准 / 关线都不重新上色
+const gColor = (e, id) => `var(--s${Math.min(e.groups.findIndex(g => g.id === id) + 1, 5)})`;
+// 逐日趋势：差值模式 = 实验 − 基准（By天，单位 = 设备-天）+ 95% CI 带；取值模式 = 各组原值
+function drawTrend(e, x, id, baseId) {
+  const el = $("#" + id), t = x.src, base = e.groups.find(g => g.id === baseId) || e.groups.find(g => g.role === "control");
+  const others = e.groups.filter(g => g.id !== base.id);
   const rows = t.rows.filter(r => r.type === "day"), days = rows.map(r => r.date);
-  const lab = g => (g.label && g.label !== g.id ? `${g.label}·${g.id}` : g.id) + (g.role === "control" ? "（对照）" : "");
+  const lab = g => gLab(g) + (g.id === base.id ? "（基准）" : "");
+  const title = `${e.name} · ${x.title}`;
+  if (t.kind === "ratio" && (S.tmode || "diff") === "diff") {
+    const pp = t.unit !== "num";
+    const dv = c => c == null ? null : pp ? c.diff : c.rel, lo = c => c == null ? null : pp ? c.ci_low : c.rel_ci_low, hi = c => c == null ? null : pp ? c.ci_high : c.rel_ci_high;
+    const series = others.map(g => { const cs = rows.map(r => r.vs[g.id]);
+      return { name: `${gLab(g)} − ${gLab(base)}`, color: gColor(e, g.id), pts: cs.map(dv), band: [cs.map(lo), cs.map(hi)] }; });
+    const yfmt = v => v == null ? "—" : pp ? sgn(v * 100, 2) + "pp" : sgn(v * 100, 1) + "%";
+    lineChart(el, days, series, yfmt, true, null, { zero: true, key: id + ":diff:" + t.key, title: title + `（逐日差值，${pp ? "百分点" : "相对差"}，95% CI）` });
+    return;
+  }
   const pick = t.kind === "ratio" ? x2 => x2 ? x2.value : null : x2 => x2 && x2.q[0] != null ? x2.q[0] : null;
-  const series = [ctrl, ...trts].map((g, j) => ({ name: lab(g) + (t.kind === "ratio" ? "" : " 第一个分位点"), color: `var(--s${j + 1})`, pts: rows.map(r => pick(r.groups[g.id])) }));
-  const yfmt = v => v == null ? "—" : t.kind !== "ratio" ? String(+v.toPrecision(4)) : t.unit !== "num" ? (v * 100).toFixed(v < 0.1 ? 2 : 1) + "%" : v.toFixed(2);
-  lineChart(el, days, series, yfmt, true);
+  const series = [base, ...others].map(g => ({ name: lab(g) + (t.kind === "ratio" ? "" : " P50"), color: gColor(e, g.id), pts: rows.map(r => pick(r.groups[g.id])) }));
+  const yfmt = v => v == null ? "—" : t.kind !== "ratio" ? Math.round(v) + " ms" : t.unit !== "num" ? (v * 100).toFixed(v < 0.1 ? 2 : 1) + "%" : v.toFixed(2);
+  lineChart(el, days, series, yfmt, true, null, { key: id + ":val:" + t.key, title: title + "（逐日取值）" });
+}
+
+// ─────────── 读数可视化 ───────────
+const TRT = {};   // TRT[实验 id] = 指标卡当前看的组
+const gLab = g => g.label && g.label !== g.id ? `${g.label}·${g.id}` : g.id;
+const ROLE_ORDER = { "北极星": 0, "过程": 1, "护栏": 2 };
+const sortTables = ts => [...ts].sort((a, b) => (ROLE_ORDER[a.group] ?? 3) - (ROLE_ORDER[b.group] ?? 3));
+const totalRow = t => t.rows.find(r => r.type === "total");
+// 变化幅度：百分比指标用 pp（与读数表 Δ 一致），数值指标用相对差 %
+const dFmt = (t, v) => v == null || !isFinite(v) ? "—" : t.unit !== "num" ? sgn(v * 100, 2) + "pp" : sgn(v * 100, 1) + "%";
+const dOf = (t, c) => c ? (t.unit !== "num" ? [c.diff, c.ci_low, c.ci_high, c.mde_abs] : [c.rel, c.rel_ci_low, c.rel_ci_high, c.mde_rel]) : null;
+const sigCls = c => c && c.read ? (c.read === "显著正向" ? "up" : "down") : "";
+
+function expCards(ts, base, trt) {
+  return ts.map(t => {
+    const r = totalRow(t), c = r.vs[trt.id], d = dOf(t, c), gb = r.groups[base.id], gt = r.groups[trt.id];
+    const v = x => x && x.value != null ? (t.unit !== "num" ? pct(x.value) : x.value.toFixed(2)) : "—";
+    if (!d) return `<div class="xcard"><div class="k">${esc(t.name)}</div><div class="v">—</div><div class="s">暂无累计读数</div></div>`;
+    const [est, lo, hi, mde] = d, cls = sigCls(c);
+    // 小条刻度：覆盖区间与 ±MDE，0 居中
+    const span = Math.max(Math.abs(lo), Math.abs(hi), mde || 0) * 1.15 || 1e-9, X = u => 50 + u / span * 50;
+    const tag = !c.read ? `<span class="tag">不显著</span>` : `<span class="tag ${cls}">${esc(c.read)}</span>` +
+      (Math.abs(c.diff) < c.mde_abs ? `<span class="tag">低于可测下限</span>` : "");
+    const lbl = t.lower_is_better ? "越低越好" : "";
+    return `<div class="xcard${t.group === "北极星" ? " hero" : ""}" data-tip="${esc(`${t.name}：${gLab(trt)} ${v(gt)} vs ${gLab(base)} ${v(gb)}；Δ ${dFmt(t, est)}，95% CI [${dFmt(t, lo)}, ${dFmt(t, hi)}]，可测下限 ±${dFmt(t, mde).replace(/^[+-]/, "")}；z = ${sgn(c.z, 2)}`)}">
+      <div class="k">${t.group === "北极星" ? "北极星 · " : ""}${esc(t.name)}${lbl ? ` <small class="muted">${lbl}</small>` : ""}</div>
+      <div class="v ${cls}">${dFmt(t, est)}</div>
+      <div class="ci-bar" aria-label="95% 置信区间 ${dFmt(t, lo)} 到 ${dFmt(t, hi)}">
+        <span class="mde" style="left:${X(-mde)}%;width:${X(mde) - X(-mde)}%"></span><span class="z0"></span>
+        <span class="rng ${cls}" style="left:${X(lo)}%;width:${Math.max(X(hi) - X(lo), 0.8)}%"></span><span class="pt ${cls}" style="left:${X(est)}%"></span></div>
+      <div class="s">[${dFmt(t, lo)}, ${dFmt(t, hi)}] · ${v(gt)} vs ${v(gb)}</div>
+      <div class="tags">${tag}</div></div>`;
+  }).join("");
+}
+
+// 置信区间总览：每个指标一行、每个实验组一条区间线；横轴统一用相对变化，指标间才可比
+function forest(el, e, ts, base) {
+  const others = e.groups.filter(g => g.id !== base.id), key = "forest:" + e.id, hid = HIDE[key] ||= new Set();
+  const vis = others.filter(g => !hid.has(gLab(g)));
+  const rowsD = ts.map(t => ({ t, cs: vis.map(g => ({ g, c: totalRow(t).vs[g.id] })) }));
+  const vals = rowsD.flatMap(r => r.cs.filter(x => x.c && x.c.rel != null).flatMap(x => [x.c.rel_ci_low, x.c.rel_ci_high, x.c.mde_rel, -x.c.mde_rel]));
+  const legend = others.map((g, i) => `<button type="button" class="lg${hid.has(gLab(g)) ? " off" : ""}" data-i="${i}" aria-pressed="${!hid.has(gLab(g))}" title="点击显示 / 隐藏这一组"><i style="background:${gColor(e, g.id)}"></i>${esc(gLab(g))} vs ${esc(gLab(base))}</button>`).join("");
+  el.dataset.title = `${e.name} · 置信区间总览（相对变化，95% CI；灰带 = 可测下限）`;
+  const W = Math.max(el.clientWidth || 640, 360), LW = Math.min(230, W * 0.36), R = 70, gh = 14, rh = Math.max(30, vis.length * gh + 14), T = 8, B = 26;
+  const H = T + ts.length * rh + B;
+  let s = `<svg width="${W}" height="${H}" role="img" aria-label="置信区间总览">`;
+  if (!vals.length) s += `<text x="${W / 2}" y="${H / 2}" text-anchor="middle">${vis.length ? "暂无读数" : "组都关掉了，点上方图例重新显示"}</text>`;
+  else {
+    const m = Math.max(...vals.map(Math.abs)) * 1.12, X = u => LW + (u + m) / (2 * m) * (W - LW - R);
+    const step = niceMax(m / 2) / 2, ticks = [];
+    for (let i = -Math.floor(m / step); i * step <= m + 1e-12; i++) ticks.push(i * step);
+    const td = Number.isInteger(+(step * 100).toFixed(6)) ? 0 : (step * 1000) % 1 ? 2 : 1;
+    s += ticks.map(u => `<line class="gl" x1="${X(u)}" x2="${X(u)}" y1="${T}" y2="${H - B}"/><text x="${X(u)}" y="${H - 8}" text-anchor="middle">${Math.abs(u) < 1e-12 ? "0" : sgn(u * 100, td)}%</text>`).join("");
+    rowsD.forEach(({ t, cs }, i) => {
+      const y0 = T + i * rh, cy = j => y0 + (rh - (cs.length - 1) * gh) / 2 + j * gh;
+      if (i) s += `<line class="gl" x1="0" x2="${W}" y1="${y0}" y2="${y0}"/>`;
+      s += `<text class="lab${t.group === "北极星" ? " ns" : ""}" x="0" y="${y0 + rh / 2 + 4}">${esc(t.name.length > 18 ? t.name.slice(0, 17) + "…" : t.name)}</text>`;
+      const md = Math.max(...cs.map(x => x.c ? x.c.mde_rel || 0 : 0));
+      if (md) s += `<rect class="mdeband" x="${X(-md)}" y="${y0 + 3}" width="${X(md) - X(-md)}" height="${rh - 6}" rx="3"/>`;
+      cs.forEach(({ g, c }, j) => {
+        if (!c || c.rel == null) return;
+        const col = gColor(e, g.id), cls = sigCls(c), yy = cy(j);
+        s += `<line class="ci" x1="${X(c.rel_ci_low)}" x2="${X(c.rel_ci_high)}" y1="${yy}" y2="${yy}" style="stroke:${col}"/>`;
+        s += `<circle cx="${X(c.rel)}" cy="${yy}" r="4.5" fill="${col}" stroke="var(--card)" stroke-width="2"/>`;
+        s += `<text class="val ${cls}" x="${W - R + 8}" y="${yy + 4}">${sgn(c.rel * 100, 1)}%</text>`;
+        s += `<rect class="hit" x="${LW}" y="${yy - gh / 2}" width="${W - LW}" height="${gh}" fill="transparent" data-t="${esc(`<b>${t.name}</b><br><span class="sw" style="background:${col}"></span>${gLab(g)} vs ${gLab(base)}：${sgn(c.rel * 100, 2)}%<br>95% CI [${sgn(c.rel_ci_low * 100, 2)}%, ${sgn(c.rel_ci_high * 100, 2)}%]<br>可测下限 ±${(c.mde_rel * 100).toFixed(2)}% · ${c.read || "不显著"}${t.unit !== "num" ? `<br>绝对差 ${dFmt(t, c.diff)}` : ""}`)}"/>`;
+      });
+    });
+    s += `<line class="zero" x1="${X(0)}" x2="${X(0)}" y1="${T}" y2="${H - B}"/>`;
+  }
+  el.innerHTML = chartTop(legend + staticLegend([["var(--grid)", "可测下限（MDE）", "box"]])) + s + `</svg>`;
+  $$(".hit", el).forEach(r => { r.addEventListener("mousemove", ev => showTip(r.dataset.t, ev)); r.addEventListener("mouseleave", hideTip); });
+  $$(".legend .lg[data-i]", el).forEach(b => b.onclick = () => { const n = gLab(others[+b.dataset.i]); hid.has(n) ? hid.delete(n) : hid.add(n); forest(el, e, ts, base); });
+}
+
+// 分布箱型图：每组按设备取值（分子 ÷ 分母，同一并集、同一封顶）的 P5 / P25 / P50 / P75 / P95，菱形 = 设备均值
+function boxPlot(el, note, e, k, dist, base) {
+  const gs = [base, ...e.groups.filter(g => g.id !== base.id)].filter(g => dist[g.id] && dist[g.id].metrics && dist[g.id].metrics[k]);
+  const key = "box:" + e.id + ":" + k, hid = HIDE[key] ||= new Set(), vis = gs.filter(g => !hid.has(gLab(g)));
+  const D = g => dist[g.id].metrics[k], f2 = v => v == null ? "—" : (+v).toFixed(Math.abs(v) < 10 ? 2 : 1);
+  el.dataset.title = `${e.name} · ${metricName(k)} · 每设备取值分布`;
+  const legend = gs.map((g, i) => `<button type="button" class="lg${hid.has(gLab(g)) ? " off" : ""}" data-i="${i}" aria-pressed="${!hid.has(gLab(g))}"><i style="background:${gColor(e, g.id)}"></i>${esc(gLab(g))}${g.id === base.id ? "（基准）" : ""}</button>`).join("");
+  const short = g => { const t = g.label && g.label !== g.id ? g.label : g.id; return t.length > 14 ? t.slice(0, 13) + "…" : t; };
+  const W = Math.max(el.clientWidth || 640, 360), LW = 120, R = 24, bh = 22, rh = 40, T = 6, B = 26, H = T + Math.max(vis.length, 1) * rh + B;
+  const vals = vis.flatMap(g => [...D(g).q, D(g).avg]).filter(v => v != null);
+  let s = `<svg width="${W}" height="${H}" role="img" aria-label="分布箱型图">`;
+  if (!vals.length) s += `<text x="${W / 2}" y="${H / 2}" text-anchor="middle">${vis.length ? "无数据" : "组都关掉了，点上方图例重新显示"}</text>`;
+  else {
+    const mx = niceMax(Math.max(...vals)), X = v => LW + v / mx * (W - LW - R);
+    s += [0, .25, .5, .75, 1].map(u => `<line class="gl" x1="${X(u * mx)}" x2="${X(u * mx)}" y1="${T}" y2="${H - B}"/><text x="${X(u * mx)}" y="${H - 8}" text-anchor="middle">${f2(u * mx)}</text>`).join("");
+    vis.forEach((g, i) => {
+      const [p5, p25, p50, p75, p95] = D(g).q, avg = D(g).avg, cy = T + i * rh + rh / 2, col = gColor(e, g.id);
+      s += `<text class="lab" x="0" y="${cy + 4}">${esc(short(g))}</text>`;
+      s += `<line class="whisk" x1="${X(p5)}" x2="${X(p95)}" y1="${cy}" y2="${cy}" style="stroke:${col}"/>`;
+      s += [p5, p95].map(v => `<line class="whisk" x1="${X(v)}" x2="${X(v)}" y1="${cy - 6}" y2="${cy + 6}" style="stroke:${col}"/>`).join("");
+      s += `<rect x="${X(p25)}" y="${cy - bh / 2}" width="${Math.max(X(p75) - X(p25), 2)}" height="${bh}" rx="3" class="boxr" style="fill:${col};stroke:${col}"/>`;
+      s += `<line x1="${X(p50)}" x2="${X(p50)}" y1="${cy - bh / 2}" y2="${cy + bh / 2}" class="med"/>`;
+      if (avg != null) s += `<path d="M${X(avg)},${cy - 6}l6,6l-6,6l-6,-6z" fill="var(--card)" stroke="${col}" stroke-width="2"/>`;
+      s += `<rect class="hit" x="${LW}" y="${cy - rh / 2}" width="${W - LW}" height="${rh}" fill="transparent" data-t="${esc(`<b>${gLab(g)}</b>（${fmt(D(g).n)} 台设备）<br>P5 ${f2(p5)} · P25 ${f2(p25)} · P50 ${f2(p50)}<br>P75 ${f2(p75)} · P95 ${f2(p95)}<br>设备均值 ${f2(avg)}`)}"/>`;
+    });
+  }
+  el.innerHTML = chartTop(legend + staticLegend([["var(--muted)", "箱 = P25~P75，竖线 = P50，须 = P5~P95，◇ = 设备均值"]])) + s + `</svg>`;
+  $$(".hit", el).forEach(r => { r.addEventListener("mousemove", ev => showTip(r.dataset.t, ev)); r.addEventListener("mouseleave", hideTip); });
+  $$(".legend .lg[data-i]", el).forEach(b => b.onclick = () => { const n = gLab(gs[+b.dataset.i]); hid.has(n) ? hid.delete(n) : hid.add(n); boxPlot(el, note, e, k, dist, base); });
+  // 说明：均值远高于中位数 = 少数重度用户在拉均值
+  const hint = gs.map(g => { const x = D(g); return x.q[2] != null && x.avg != null ? `${gLab(g)} 均值 ${f2(x.avg)} / 中位数 ${f2(x.q[2])} / P95 ${f2(x.q[4])}` : ""; }).filter(Boolean);
+  note.textContent = `每台进组设备（窗口内有分母的）一个取值，口径同读数（同一设备并集、同一 P99 封顶）。${hint.join("；")}。均值明显高于中位数 = 均值主要由少数重度设备拉动；读人均类指标的 Δ 时，再看两组的箱和 P95 是否一起移动。`;
+  COPY["dist_" + k] = () => ({ caption: `${e.name} · ${metricName(k)} · 每设备取值分布`, header: ["组", "设备数", "P5", "P25", "P50", "P75", "P95", "设备均值"],
+    rows: gs.map(g => [gLab(g) + (g.id === base.id ? "（基准）" : ""), fmt(D(g).n), ...D(g).q.map(f2), f2(D(g).avg)]) });
+}
+
+// 进组趋势：每天新进组 / 累计进组设备数，分组对比
+function entryChart(el, e, dist) {
+  const gs = e.groups.filter(g => dist[g.id] && dist[g.id].entry), days = [...new Set(gs.flatMap(g => Object.keys(dist[g.id].entry)))].map(Number).sort();
+  const cum = (S.entry || "cum") === "cum";
+  const series = gs.map(g => { let a = 0; return { name: gLab(g) + (g.role === "control" ? "（对照）" : ""), color: gColor(e, g.id),
+    pts: days.map(d => { const n = dist[g.id].entry[d] || 0; a += n; return cum ? a : n; }) }; });
+  lineChart(el, days, series, fmtShort, false, null, { key: "entry:" + e.id, title: `${e.name} · ${cum ? "累计进组设备数" : "每天新进组设备数"}` });
 }
 
 // ─────────── 指标库 ───────────

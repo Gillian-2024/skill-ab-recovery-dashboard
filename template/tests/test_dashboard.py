@@ -79,6 +79,11 @@ class SqlTest(unittest.TestCase):
             mm = {m["key"]: m for m in C.cfg["metrics"]}
             ratio = [{"key": k, "name": m["name"], "def": m} for k, m in mm.items() if m["kind"] == "ratio"]
             sqlgen.experiment_ratio_sql("ALL", ["G100", "G101"], 20261001, 20261007, ratio, {"plays_per_user": 2.0})
+            ds = sqlgen.experiment_dist_sql("ALL", ["G100", "G101"], 20261001, 20261003, ratio, {"plays_per_user": 2.0}, None,
+                                            jobs.dist_keys(mm, list(mm)), [20261001, 20261002, 20261003])
+            self.assertIn("e_20261003", ds)
+            self.assertNotIn("UNION", ds.upper())
+            self.assertEqual("q4_plays_per_user" in ds, d != "mysql")
             if d != "mysql":
                 sqlgen.experiment_quantile_sql("ALL", ["G100", "G101"], 20261001, 20261007, {"key": "startup_ms", "def": mm["startup_ms"]})
             else:
@@ -225,6 +230,21 @@ class EndToEndTest(_Env):
         self.assertTrue(any(r["type"] == "cum" and r["days"] == C.cfg["experiment"]["cadence"]["stop_loss"] for r in t["click_rate"]["rows"]))
         q = next(r for r in t["startup_ms"]["rows"] if r["type"] == "total")["groups"]["G101"]["q"]
         self.assertEqual(len(q), 2)
+        # 分布 + 进组趋势：人均类指标出箱型图；各组进组累计 = 分流检查设备数
+        self.assertEqual(v["dist_keys"], ["plays_per_user"])
+        for g in ("G100", "G101"):
+            d = v["dist"][g]
+            self.assertEqual(sum(d["entry"].values()), v["srm"]["counts"][g])
+            qs = d["metrics"]["plays_per_user"]["q"]
+            self.assertEqual(qs, sorted(qs))
+            # 封顶是单设备单天，窗口内按天累加：每设备取值 ≤ 封顶 × 天数
+            self.assertLessEqual(qs[-1], e["caps"]["plays_per_user"] * len(d["entry"]))
+        # 换基准：表格按新基准比，结论提要仍按对照组
+        vb = jobs.experiment_view(e, "G101")
+        self.assertEqual((vb["base"], vb["trts"]), ("G101", ["G100"]))
+        cb = next(r for r in {x["key"]: x for x in vb["tables"]}["click_rate"]["rows"] if r["type"] == "total")["vs"]["G100"]
+        self.assertAlmostEqual(cb["diff"], -tot("click_rate")["diff"])
+        self.assertEqual(vb["summary"], v["summary"])
         sm = v["summary"]
         self.assertEqual(sm["state"], "ok")
         self.assertEqual(sm["head"]["stage"], "出结论")
