@@ -406,7 +406,7 @@ async function waitJob(id, onTick) {
     const j = (await api("/api/jobs")).find(x => x.id === id);
     if (onTick) onTick(j);
     if (!j || j.status === "done") return j;
-    if (j.status === "failed") throw new Error(j.error || "任务失败，见任务日志");
+    if (j.status === "failed" || j.status === "cancelled") throw new Error(j.error || "任务失败，见任务日志");
   }
 }
 
@@ -1117,7 +1117,7 @@ function readMetric() {
 // ─────────── 日志 ───────────
 // 任务日志：每个任务能追到「谁触发 → 跑了哪几条 SQL → 每条的任务号 / 行数 / 耗时」，SQL 可复制去数据源复跑核对
 const JOB_KIND = { funnel: "漏斗刷新", experiment: "实验回收", exp_followup: "实验补算（累计行 / By天 / 分位数）" };
-const JOB_ST = { queued: "排队", running: "运行中", done: "完成", failed: "失败" };
+const JOB_ST = { queued: "排队", running: "运行中", done: "完成", failed: "失败", cancelled: "已取消" };
 const JOB_SQL = {};
 const cleanErr = (s, n) => String(s || "").replace(/[│█▀▄╭╮╰╯─]+/g, " ").replace(/\s+/g, " ").slice(0, n);
 let EXP_NAMES = {};
@@ -1140,13 +1140,22 @@ async function loadJobs() {
   const ds = s => s == null ? "" : s >= 60 ? `${Math.floor(s / 60)} 分 ${s % 60} 秒` : `${s} 秒`;
   $("#jobList").innerHTML = js.length ? `<div class="scroll"><table class="jtab"><thead><tr><th>任务号</th><th>类型</th><th>对象</th><th>状态</th><th>提交时间</th><th>耗时</th><th>明细</th></tr></thead><tbody>` +
     js.map(j => `<tr class="jrow" data-id="${j.id}"><td>#${j.id}</td><td>${esc(JOB_KIND[j.kind] || j.kind)}</td><td class="tgt">${jobTarget(j)}</td>
-      <td><span class="pill ${j.status}">${JOB_ST[j.status] || j.status}</span></td>
+      <td><span class="pill ${j.status}">${JOB_ST[j.status] || j.status}</span>${["queued", "running"].includes(j.status) ? ` <button type="button" class="btn copy danger" data-cancel="${j.id}" title="${j.status === "running" ? "停在当前这条查询：已落库的保留，没跑的不再跑" : "从队列里拿掉，不跑"}">取消</button>` : ""}</td>
       <td>${new Date(j.created_at * 1000).toLocaleString()}</td><td>${ds(dur(j))}</td>
       <td><button type="button" class="btn copy" data-q="${j.id}">${j.n_queries ? `${j.n_queries} 条 SQL` : "日志"} ▸</button></td></tr>
       <tr class="jdet" id="jd${j.id}" hidden><td colspan="7"></td></tr>
-      ${j.error ? `<tr class="jerr"><td colspan="7"><div class="notice crit"><b>错误</b>${esc(cleanErr(j.error, 400))}</div></td></tr>` : ""}`).join("") + `</tbody></table></div>
+      ${j.error ? `<tr class="jerr"><td colspan="7"><div class="notice ${j.status === "cancelled" ? "info" : "crit"}"><b>${j.status === "cancelled" ? "已取消" : "错误"}</b>${esc(cleanErr(j.error, 400))}</div></td></tr>` : ""}`).join("") + `</tbody></table></div>
     <p class="foot">「明细」= 该任务实际提交给数据源的查询，含任务号（自定义命令通道返回 task_id 时显示）、返回行数、耗时；复制后可直接到数据源复跑核对。</p>` : `<p class="muted">暂无任务</p>`;
   $$("#jobList [data-q]").forEach(b => b.onclick = () => toggleJob(+b.dataset.q, b, js.find(j => j.id === +b.dataset.q)));
+  // 取消：排队中的直接拿掉；运行中的停在当前这条查询，已落库的保留
+  $$("#jobList [data-cancel]").forEach(b => b.onclick = async () => {
+    const id = +b.dataset.cancel, j = js.find(x => x.id === id);
+    if (!confirm(`取消任务 #${id}（${JOB_KIND[j.kind] || j.kind}）？${j.status === "running" ? "\n已经拉回来的数据保留，剩下的不再跑。" : ""}`)) return;
+    b.disabled = true;
+    try { const r = await api(`/api/jobs/${id}/cancel`, { method: "POST", body: {} }); flash(b, r.state === "cancelling" ? "取消中…" : "已取消", true); }
+    catch (e) { flash(b, e.message, false); }
+    setTimeout(loadJobs, 800);
+  });
   $$("#jobList [data-exp]").forEach(a => a.onclick = () => { CUR_EXP = +a.dataset.exp; });
   if (js.some(j => ["queued", "running"].includes(j.status)) && location.hash === "#logs") setTimeout(loadJobs, 4000);
 }
@@ -1178,10 +1187,19 @@ async function loadHealth() {
     out += `<div class="notice crit"><b>${SRC_NAME[META.source_type] || "数据源"}${h.auth_ok ? "凭据可能已失效" : "凭据未配置"}</b>取数会失败。${esc(h.auth_hint || "按 README「配置数据源」检查 .env / 登录态后重启看板")}，再到「任务日志」重跑失败的任务。</div>`;
   const fe = h.failed_exps || [];
   if (fe.length)
-    out += `<div class="notice crit"><b>${fe.length} 个实验处于失败状态</b>${fe.map(e => `<a href="#exp" data-exp="${e.id}">${esc(e.name)}</a>（${e.partial ? "部分补算失败" : "跑数失败，已停止每日续跑"}）`).join("；")}。打开实验点「重跑」；这条提醒在重跑成功前一直显示。</div>`;
-  if (h.fails.length)
-    out += `<div class="notice warn"><b>近 24 小时 ${h.fails.length} 个任务失败</b>${h.fails.slice(0, 3).map(f => `#${f.id} ${JOB_KIND[f.kind] || f.kind}：${esc(cleanErr(f.error, 90))}`).join("；")}${h.fails.length > 3 ? " 等" : ""}。<a href="#logs">去任务日志</a></div>`;
+    out += `<div class="notice crit"><b>${fe.length} 个实验处于失败状态</b>${fe.map(e => `<a href="#exp" data-exp="${e.id}">${esc(e.name)}</a>（${/取消/.test(e.error) ? "已取消，已停止每日续跑" : e.partial ? "部分补算失败" : "跑数失败，已停止每日续跑"}）`).join("；")}。打开实验点「重跑」；这条提醒在重跑成功前一直显示。</div>`;
+  // 手动关掉的失败提醒：记住这批任务号（存本浏览器），之后有新的失败任务会重新出现
+  let shut = [];
+  try { shut = JSON.parse(localStorage.getItem("hideFails") || "[]"); } catch (_) { }
+  const fails = h.fails.filter(f => !shut.includes(f.id));
+  if (fails.length)
+    out += `<div class="notice warn"><b>近 24 小时 ${fails.length} 个任务失败</b>${fails.slice(0, 3).map(f => `#${f.id} ${JOB_KIND[f.kind] || f.kind}：${esc(cleanErr(f.error, 90))}`).join("；")}${fails.length > 3 ? " 等" : ""}。<a href="#logs">去任务日志</a>
+      <button type="button" class="notice-x" id="hideFails" aria-label="关闭这条提醒" title="关闭；之后有新的失败任务会再提醒">×</button></div>`;
   $("#health").innerHTML = out;
+  if ($("#hideFails")) $("#hideFails").onclick = () => {
+    try { localStorage.setItem("hideFails", JSON.stringify([...new Set([...shut, ...h.fails.map(f => f.id)])].slice(-200))); } catch (_) { }
+    loadHealth();
+  };
   $$("#health [data-exp]").forEach(a => a.onclick = () => { CUR_EXP = +a.dataset.exp; if (location.hash === "#exp") loadExpList(); });
 }
 

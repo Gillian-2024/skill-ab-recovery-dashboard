@@ -5,9 +5,13 @@ import time
 import traceback
 
 from . import config as C, sqlgen, stats, store
-from .sources import SourceTimeout, open_source
+from . import sources
+from .sources import Cancelled, SourceTimeout, open_source
 
 _wake = threading.Event()
+# 取消：_cur = 正在跑的任务号；_want = 被要求取消、但工作线程可能还没接手的任务号
+_lock = threading.Lock()
+_cur, _want = None, set()
 
 
 def ymd(d):
@@ -154,6 +158,8 @@ def run_experiment(jid, p):
     store.update_experiment(e["id"], status="running", error=None)
     try:
         _run_experiment(e, log, p.get("only"), p.get("only_daily"), jid=jid)
+    except Cancelled:
+        raise                             # 实验状态由 _after_cancel 统一处理
     except Exception as ex:
         store.update_experiment(e["id"], status="failed", error=str(ex)[:800])
         raise
@@ -243,7 +249,7 @@ def run_exp_followup(jid, p):
     d0, d1 = int(e["start"]), int(p["run_end"])
     pending = [k for k in e["pending"] if k in ("@cum", "@dist") or k.split("@")[0] in mm]
     caps = dict(e.get("caps") or {})
-    partial = []
+    partial, stopped = [], False
 
     def done(keys):
         nonlocal pending
@@ -263,6 +269,8 @@ def run_exp_followup(jid, p):
                             rows = src.dicts(sqlgen.experiment_ratio_sql(e["scope"], gids, d0, cend, ms, caps, subs), "前 %d 天累计 ×%d" % (c, len(ms)))
                             for k in miss:
                                 store.save_exp_results(e["id"], "%s@c%d" % (k, c), _ratio_payload(rows, k), cend)
+                except Cancelled:
+                    raise
                 except Exception as ex:
                     partial.append("前 N 天累计：%s" % str(ex)[:200])
                     log("⚠ 前 N 天累计失败，其余照常：%s" % ex)
@@ -270,6 +278,8 @@ def run_exp_followup(jid, p):
             if "@dist" in pending:
                 try:
                     _run_dist(src, e, mm, gids, subs, d0, d1, caps)
+                except Cancelled:
+                    raise
                 except Exception as ex:
                     partial.append("分布 / 进组趋势：%s" % str(ex)[:200])
                     log("⚠ 分布 / 进组趋势失败，其余照常：%s" % ex)
@@ -285,6 +295,8 @@ def run_exp_followup(jid, p):
                             vals = {f: float(r.get("%s_%s" % (f, m["key"])) or 0) for f in STAT_F}
                             payload.setdefault(str(r["grp"]), {})[str(sqlgen.to_ymd(r["d"]))] = dict(n=int(r["n"]), **vals)
                         store.save_exp_results(e["id"], m["key"] + "@day", payload, d1)
+                except Cancelled:
+                    raise
                 except Exception as ex:
                     partial.append("By天 比率：%s" % str(ex)[:200])
                     log("⚠ By天 比率失败，其余照常：%s" % ex)
@@ -296,15 +308,23 @@ def run_exp_followup(jid, p):
                 try:
                     rows = src.dicts(sqlgen.experiment_quantile_sql(e["scope"], gids, d0, d1, m, subs, daily), label)
                     store.save_exp_results(e["id"], k, _quant_payload(rows, m, daily), d1)
+                except Cancelled:
+                    raise
                 except Exception as ex:
                     partial.append("%s：%s" % (label, str(ex)[:200]))
                     log("⚠ %s 失败，其余照常：%s" % (label, ex))
                 done([k])
+    except Cancelled:
+        stopped = True
+        raise
     except Exception as ex:
         partial.append(str(ex)[:300])
         raise
     finally:
-        store.update_experiment(e["id"], pending=[], error=("补算失败（可点重跑）：" + "；".join(partial)) if partial else None)
+        err = "补算失败（可点重跑）：" + "；".join(partial) if partial else None
+        if stopped:
+            err = "补算已取消（已出的结果保留，可点重跑）" + ("；另有失败：" + "；".join(partial) if partial else "")
+        store.update_experiment(e["id"], pending=[], error=err)
     log("补算完成")
 
 
@@ -537,20 +557,79 @@ def summary(e, srm, tables, trts):
 RUNNERS = {"funnel": run_funnel, "experiment": run_experiment, "exp_followup": run_exp_followup}
 
 
+def cancel(jid):
+    """取消任务。排队中 → 直接取消；运行中 → 发信号，当前这条查询的结果不再收、后面的不再跑，已落库的保留。
+    返回 'cancelled' / 'cancelling' / None（不存在）；已结束的抛 ValueError（含已取消过的，免得和刚取消混淆）。"""
+    with _lock:
+        _want.add(jid)
+        j = store.cancel_queued_job(jid)
+        if not j:
+            _want.discard(jid)
+            return None
+        if j["status"] == "queued":
+            _want.discard(jid)
+            _after_cancel(j["kind"], j["params"])
+            return "cancelled"
+        if j["status"] == "running":
+            if _cur == jid:
+                sources.CANCEL.set()
+            return "cancelling"
+        _want.discard(jid)
+        raise ValueError("任务已结束（%s），不能取消" % j["status"])
+
+
+def _after_cancel(kind, p):
+    """被取消的实验任务：实验标失败（停每日续跑，等人点重跑），已出的结果不动。"""
+    if "exp_id" not in p:
+        return
+    e = store.experiment(int(p["exp_id"]))
+    if not e:
+        return
+    if kind == "experiment":
+        store.update_experiment(e["id"], status="failed", error="跑数已取消（已出的结果保留），点「重跑」继续")
+    elif e.get("pending"):
+        store.update_experiment(e["id"], pending=[], error="补算已取消（已出的结果保留，可点重跑）")
+
+
 def worker():
     while True:
-        j = store.next_job()
+        try:
+            j = store.next_job()
+        except Exception:                 # 库锁等瞬时错误：别让工作线程死掉
+            traceback.print_exc()
+            time.sleep(10)
+            continue
         if not j:
             _wake.wait(5)
             _wake.clear()
             continue
-        try:
-            store.job_log(j["id"], "开始 %s %s" % (j["kind"], j["params"]))
-            RUNNERS[j["kind"]](j["id"], j["params"])
-            store.finish_job(j["id"])
-        except Exception as ex:
-            store.job_log(j["id"], traceback.format_exc()[-1500:])
-            store.finish_job(j["id"], str(ex)[:800])
+        run_job(j)
+
+
+def run_job(j):
+    global _cur
+    with _lock:
+        _cur = j["id"]
+        sources.CANCEL.clear()
+        if j["id"] in _want:              # 取消请求先到、工作线程后接手
+            sources.CANCEL.set()
+    try:
+        store.job_log(j["id"], "开始 %s %s" % (j["kind"], j["params"]))
+        sources.check_cancel()
+        RUNNERS[j["kind"]](j["id"], j["params"])
+        store.finish_job(j["id"])
+    except Cancelled:
+        store.job_log(j["id"], "已取消：已落库的部分保留，没跑的不再跑")
+        _after_cancel(j["kind"], j["params"])
+        store.finish_job(j["id"], "已取消（已落库的部分保留）", status="cancelled")
+    except Exception as ex:
+        store.job_log(j["id"], traceback.format_exc()[-1500:])
+        store.finish_job(j["id"], str(ex)[:800])
+    finally:
+        with _lock:
+            _cur = None
+            _want.discard(j["id"])
+            sources.CANCEL.clear()
 
 
 def daily_tick():

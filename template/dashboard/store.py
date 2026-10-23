@@ -235,7 +235,10 @@ def next_job():
         r = c.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY id LIMIT 1").fetchone()
         if not r:
             return None
-        c.execute("UPDATE jobs SET status='running', started_at=? WHERE id=?", (time.time(), r["id"]))
+        # 只接还在排队的：选中到改状态之间可能被取消
+        if not c.execute("UPDATE jobs SET status='running', started_at=? WHERE id=? AND status='queued'",
+                         (time.time(), r["id"])).rowcount:
+            return None
         return dict(r, params=json.loads(r["params"]))
 
 
@@ -255,9 +258,20 @@ def job_queries(jid):
         return [dict(r) for r in c.execute("SELECT * FROM job_queries WHERE job_id=? ORDER BY id", (jid,))]
 
 
-def finish_job(jid, error=None):
+def finish_job(jid, error=None, status=None):
     with conn() as c:
-        c.execute("UPDATE jobs SET status=?, error=?, finished_at=? WHERE id=?", ("failed" if error else "done", error, time.time(), jid))
+        c.execute("UPDATE jobs SET status=?, error=?, finished_at=? WHERE id=?",
+                  (status or ("failed" if error else "done"), error, time.time(), jid))
+
+
+def cancel_queued_job(jid):
+    """排队中的直接标取消；返回该任务（取消前的状态），不存在返回 None。"""
+    with conn() as c:
+        r = c.execute("SELECT * FROM jobs WHERE id=?", (jid,)).fetchone()
+        if r and r["status"] == "queued":
+            c.execute("UPDATE jobs SET status='cancelled', error='已取消（排队中，未开始跑）', finished_at=? WHERE id=? AND status='queued'",
+                      (time.time(), jid))
+        return dict(r, params=json.loads(r["params"] or "{}")) if r else None
 
 
 def jobs(limit=60):

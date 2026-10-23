@@ -4,6 +4,7 @@
     with open_source(log, trace) as src:
         rows = src.dicts(sql, "标签")      # -> list[dict]
 trace(q) 每条查询回调一次：{label, sql, rows, seconds, error, task_id}，用于任务日志溯源。
+取消：CANCEL 置位后，正在等的查询不再等（duckdb 中断 / 取数命令终止 / sqlalchemy 只是不再等），后续查询直接抛 Cancelled。
 """
 import json
 import os
@@ -12,6 +13,10 @@ import threading
 import time
 
 from . import config as C
+
+# 取消当前任务：工作线程单线程串行，同一时刻只有一个任务在取数，一个全局信号就够
+CANCEL = threading.Event()
+_POLL = 0.5                               # 等查询时每隔多久看一眼取消信号（秒）
 
 
 class SourceError(RuntimeError):
@@ -24,6 +29,27 @@ class SourceTimeout(SourceError):
 
 class SourceAuthError(SourceError):
     pass
+
+
+class Cancelled(SourceError):
+    """用户在任务日志里点了取消。当前这条查询的结果不再收，后面的查询不再跑。"""
+
+
+def check_cancel():
+    if CANCEL.is_set():
+        raise Cancelled("已取消")
+
+
+def _wait(alive, timeout):
+    """等查询跑完，期间每 _POLL 秒看一眼取消信号。返回 'done' / 'timeout' / 'cancel'；超时语义同 join(timeout)。"""
+    end = time.time() + timeout
+    while alive():
+        left = end - time.time()
+        if left <= 0:
+            return "timeout"
+        if CANCEL.wait(min(_POLL, left)):
+            return "cancel"
+    return "done"
 
 
 _AUTH_HINTS = ("401", "403", "unauthorized", "forbidden", "token", "credential", "login", "authenticat", "登录", "认证", "鉴权")
@@ -52,9 +78,11 @@ class _Base:
         pass
 
     def dicts(self, sql, label):
+        check_cancel()                    # 已取消：后面的查询不再提交
         t0, info = time.time(), {"label": label, "sql": sql}
         try:
             rows, task_id = self._run(sql)
+            check_cancel()                # 结果恰好在取消后回来：也不收
             info["task_id"] = task_id
             if len(rows) >= self.max_rows:
                 raise SourceError("「%s」返回 %d 行，达到上限 source.max_rows=%d，结果可能被截断。缩短日期窗口或调大上限"
@@ -105,10 +133,12 @@ class DuckDBSource(_Base):
 
         th = threading.Thread(target=go, daemon=True)
         th.start()
-        th.join(self.timeout)
-        if th.is_alive():
+        st = _wait(th.is_alive, self.timeout)
+        if st != "done":
             self.con.interrupt()
             th.join(10)
+            if st == "cancel":
+                raise Cancelled("已取消，查询已中断")
             raise SourceTimeout("查询超过 %d 秒，已中断（source.timeout_s）" % self.timeout)
         if "e" in err:
             raise _classify(str(err["e"]))
@@ -149,8 +179,10 @@ class SQLAlchemySource(_Base):
 
         th = threading.Thread(target=go, daemon=True)
         th.start()
-        th.join(self.timeout)
-        if th.is_alive():
+        st = _wait(th.is_alive, self.timeout)
+        if st == "cancel":
+            raise Cancelled("已取消，不再等这条查询；数据库侧已提交的语句停不了，会自己跑完，结果不再收")
+        if st == "timeout":
             raise SourceTimeout("查询超过 %d 秒仍未返回（source.timeout_s）。数据库侧可能仍在执行，必要时手动取消" % self.timeout)
         if "e" in err:
             raise _classify(str(err["e"]).split("\n")[0][:1500])
@@ -177,17 +209,35 @@ class CommandSource(_Base):
 
     def _run(self, sql):
         try:
-            p = subprocess.run(self.cmd, input=sql, capture_output=True, text=True, timeout=self.timeout, env=self.env)
-        except subprocess.TimeoutExpired:
-            raise SourceTimeout("取数命令超过 %d 秒未返回，已终止（source.timeout_s）" % self.timeout)
+            p = subprocess.Popen(self.cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 text=True, env=self.env)
         except FileNotFoundError:
             raise SourceError("找不到取数命令：%s" % self.cmd[0])
+        out = {}
+        # communicate 放后台线程读管道（防 stdout / stderr 写满卡死），这边轮询取消信号
+        th = threading.Thread(target=lambda: out.update(zip(("stdout", "stderr"), p.communicate(sql))), daemon=True)
+        th.start()
+        st = _wait(th.is_alive, self.timeout)
+        if st != "done":
+            if st == "cancel":
+                p.terminate()
+            else:
+                p.kill()
+            try:
+                p.wait(5)
+            except subprocess.TimeoutExpired:
+                p.kill()
+            th.join(5)
+            if st == "cancel":
+                raise Cancelled("已取消，取数命令已终止")
+            raise SourceTimeout("取数命令超过 %d 秒未返回，已终止（source.timeout_s）" % self.timeout)
+        stdout, stderr = out.get("stdout") or "", out.get("stderr") or ""
         if p.returncode != 0:
-            raise _classify("取数命令退出码 %d：%s" % (p.returncode, (p.stderr or p.stdout or "").strip()[-1500:]))
+            raise _classify("取数命令退出码 %d：%s" % (p.returncode, (stderr or stdout or "").strip()[-1500:]))
         try:
-            j = json.loads(p.stdout)
+            j = json.loads(stdout)
         except ValueError:
-            raise SourceError("取数命令的输出不是 JSON：%s" % p.stdout.strip()[:300])
+            raise SourceError("取数命令的输出不是 JSON：%s" % stdout.strip()[:300])
         task_id = j.get("task_id") if isinstance(j, dict) else None
         if isinstance(j, dict) and j.get("error"):
             raise _classify(str(j["error"]))

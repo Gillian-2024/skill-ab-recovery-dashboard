@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 import yaml
@@ -249,6 +250,118 @@ class EndToEndTest(_Env):
         self.assertEqual(sm["state"], "ok")
         self.assertEqual(sm["head"]["stage"], "出结论")
         self.assertTrue(sm["groups"][0]["lines"][0].startswith("结果页点击渗透率显著正向"))
+
+
+class CancelTest(_Env):
+    def test_cancel_queued(self):
+        eid = store.create_experiment("t", "ALL", [{"id": "G100", "role": "control"}, {"id": "G101", "role": "treatment"}],
+                                      20261001, 20261007, ["click_rate"])
+        jid = jobs.submit("experiment", {"exp_id": eid})
+        self.assertEqual(jobs.cancel(jid), "cancelled")
+        self.assertEqual(store.job(jid)["status"], "cancelled")
+        self.assertIsNone(store.next_job())                         # 不会再被工作线程接走
+        e = store.experiment(eid)
+        self.assertEqual(e["status"], "failed")
+        self.assertIn("重跑", e["error"])
+        from dashboard.app import app
+        post = lambda i: app.test_client().post("/api/jobs/%d/cancel" % i, json={}, headers={"Host": "127.0.0.1:%d" % C.cfg["server"]["port"]})
+        self.assertEqual(post(jid).status_code, 400)                # 已结束的不能再取消
+        self.assertEqual(post(99999).status_code, 404)
+
+    @unittest.skipUnless(HAS_DUCKDB, "需要 duckdb")
+    def test_cancel_running_keeps_saved(self):
+        import threading
+        from dashboard import sources
+        o, end = int(self.marks["OPEN_DAY"]), int(self.marks["END"])
+        eid = store.create_experiment("t", "ALL", [{"id": "G100", "role": "control", "weight": 1},
+                                                    {"id": "G101", "role": "treatment", "weight": 1}],
+                                      o, end, ["click_rate", "plays_per_user"], launch=o)
+        jobs.submit("experiment", {"exp_id": eid})
+        _run_queue()
+        before = {r["metric_key"] for r in store.experiment(eid)["results"]}
+        self.assertIn("click_rate", before)
+        # 重跑：P99 已写死不再算，第一条就是比率查询 → 换成一条跑很久的 duckdb 查询，跑到一半取消
+        started, orig = threading.Event(), sources.DuckDBSource._run
+
+        def slow(src, sql):
+            started.set()
+            return orig(src, "SELECT SUM(i * i) AS s FROM range(100000000000) t(i)")
+
+        sources.DuckDBSource._run = slow
+        try:
+            jid = jobs.submit("experiment", {"exp_id": eid})
+            th = threading.Thread(target=jobs.run_job, args=(store.next_job(),))
+            th.start()
+            self.assertTrue(started.wait(30))
+            self.assertEqual(jobs.cancel(jid), "cancelling")
+            th.join(30)
+            self.assertFalse(th.is_alive())
+        finally:
+            sources.DuckDBSource._run = orig
+        j = store.job(jid)
+        self.assertEqual(j["status"], "cancelled")
+        self.assertIn("已取消", j["log"])
+        e = store.experiment(eid)
+        self.assertEqual(e["status"], "failed")
+        self.assertIn("重跑", e["error"])
+        self.assertEqual({r["metric_key"] for r in e["results"]}, before)   # 之前落库的结果保留
+        self.assertIsNone(store.next_job())                                 # 补算没有排上
+        self.assertFalse(sources.CANCEL.is_set())                           # 信号已复位，不影响下一个任务
+
+    def test_command_source_cancel_and_timeout(self):
+        import threading
+        from dashboard import sources
+        c = copy.deepcopy(self.cfg)
+        c["source"] = {"type": "command", "dialect": "trino", "timeout_s": 2,
+                       "command": [sys.executable, "-c", "import sys, json, time; sql = sys.stdin.read(); "
+                                   "time.sleep(60) if 'slow' in sql else print(json.dumps({'rows': [{'n': 1}], 'task_id': 't1'}))"]}
+        C.use(c)
+        src = sources.open_source(log=lambda s: None)
+        self.assertEqual(src.dicts("select 1", "快"), [{"n": 1}])
+        with self.assertRaises(sources.SourceTimeout):
+            src.dicts("slow", "超时")
+        src.timeout = 60
+        err = {}
+
+        def go():
+            try:
+                src.dicts("slow", "取消")
+            except Exception as ex:
+                err["e"] = ex
+
+        th = threading.Thread(target=go)
+        t0 = time.time()
+        th.start()
+        time.sleep(0.5)
+        sources.CANCEL.set()
+        try:
+            th.join(15)
+        finally:
+            sources.CANCEL.clear()
+        self.assertIsInstance(err.get("e"), sources.Cancelled)
+        self.assertLess(time.time() - t0, 10)
+
+
+class HealthTest(_Env):
+    def health(self):
+        from dashboard.app import app
+        return app.test_client().get("/api/health", headers={"Host": "127.0.0.1:%d" % C.cfg["server"]["port"]}).get_json()
+
+    def run_one(self, kind, params, error=None, status=None):
+        jid = store.enqueue(kind, params)
+        self.assertEqual(store.next_job()["id"], jid)
+        store.finish_job(jid, error, status=status)
+        return jid
+
+    def test_fail_resolved_by_later_success(self):
+        bad = self.run_one("custom", {"a": 1}, "boom")
+        self.assertEqual([f["id"] for f in self.health()["fails"]], [bad])
+        self.run_one("custom", {"a": 2})                            # 参数不同：不算解决
+        self.assertEqual([f["id"] for f in self.health()["fails"]], [bad])
+        self.run_one("custom", {"a": 1})                            # 同类同参数后来成功了
+        self.assertEqual(self.health()["fails"], [])
+        self.run_one("custom", {"a": 3}, "已取消", status="cancelled")  # 取消不算失败
+        self.assertEqual(self.health()["fails"], [])
 
 
 class StageTest(unittest.TestCase):

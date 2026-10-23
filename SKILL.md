@@ -54,6 +54,7 @@ description: 访谈用户的数据口径和实验回收习惯，一键生成一�
 |---|---|
 | **凭据未配置**（顶部红条「数据源凭据未配置」） | sqlalchemy：复制 `.env.example` → `.env` 填 `DASH_DB_URL`，重启看板；command：重新登录生成 `auth_file`。不要把连接串写进 yaml 或贴进对话 |
 | **凭据失效**（报错含 401/403/token/login） | 按 `source.auth_hint` 重新登录，到任务日志 / 实验页点「重跑」 |
+| **跑错了 / 跑太久** | 任务日志点「取消」：已落库的保留、后续不跑；被取消的实验标失败，点「重跑」继续 |
 | **SQL 超时** | 漏斗查询会自动对半拆窗口重试；仍超时则缩短窗口、调大 `source.timeout_s`、确认 `table.date` 是分区列 |
 | **结果到达 max_rows** | 直接报错不用截断数据：缩短窗口或调大 `source.max_rows` |
 | **实验没有设备进组** | `tools/check_config.py --probe --date <实验期内某天>` 看分组列覆盖；核对 `group.pattern` 和样例值 |

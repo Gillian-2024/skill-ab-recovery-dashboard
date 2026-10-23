@@ -202,7 +202,8 @@ def health():
         if j["kind"] == "funnel":
             ds = list(jobs.days_between(p["start"], p["end"]))
             return all(all(store.day_status(v).get(d) for d in ds) for v in p.get("views") or [])
-        return False
+        # 其他：之后同类、同参数的任务跑成功过
+        return p in [json.loads(x["params"] or "{}") for x in js if x["id"] > j["id"] and x["kind"] == j["kind"] and x["status"] == "done"]
 
     bad = [{"id": e["id"], "name": e["name"], "partial": e["status"] != "failed", "error": (e["error"] or "")[:200]}
            for e in exps if e["status"] == "failed" or (e.get("error") and not e.get("pending"))]
@@ -328,6 +329,14 @@ def exp_delete(eid):
 @app.get("/api/jobs")
 def job_list():
     return jsonify(store.jobs())
+
+
+@app.post("/api/jobs/<int:jid>/cancel")
+def job_cancel(jid):
+    r = jobs.cancel(jid)
+    if r is None:
+        return jsonify(error="任务不存在"), 404
+    return jsonify(ok=True, state=r)
 
 
 @app.get("/api/jobs/<int:jid>/queries")
