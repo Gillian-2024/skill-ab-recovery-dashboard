@@ -360,6 +360,22 @@ def _row_stats(per, ctrl, trts, lower):
     return groups, vs
 
 
+THIN_DAY = 0.3
+
+
+def thin_days(day):
+    """逐日样本不足的天：任一组当天设备数 < 该组窗口内单日最高值的 30%（如实验中途关停后的残留流量）。只影响逐日图不画点，累计不变。
+    参照取最高值不取中位数：关停后残留天数过半时，中位数本身就被拉低，会漏判。"""
+    out = set()
+    for g, v in day.items():
+        ns = [s["n"] for s in v.values() if isinstance(s, dict) and s.get("n")]
+        if g == "X" or not ns:
+            continue
+        top = max(ns)
+        out |= {d for d, s in v.items() if isinstance(s, dict) and (s.get("n") or 0) < THIN_DAY * top}
+    return out
+
+
 def _tables(e, mm, res, ctrl, trts):
     """每个指标一张「总分」表：逐日行 → 前 N 天累计 → 全窗口累计。"""
     if not e.get("last_end"):
@@ -388,8 +404,11 @@ def _tables(e, mm, res, ctrl, trts):
             t["rows"].append({"label": label, "type": typ, "date": date, "days": days, "groups": g, "vs": vs})
 
         day = res.get(k + "@day") or {}
+        thin = thin_days(day)
         for d in sorted({d for v in day.values() for d in v}):
             add("%s-%s" % (d[4:6], d[6:]), "day", {g: v[d] for g, v in day.items() if d in v}, int(d))
+            if d in thin and t["rows"]:
+                t["rows"][-1]["thin"] = True
         if kind == "ratio":
             for c, _ in cum_cutoffs(d0, d1):
                 add("前 %d 天累计" % c, "cum", res.get("%s@c%d" % (k, c)), days=c)

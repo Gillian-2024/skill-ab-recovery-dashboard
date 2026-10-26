@@ -194,6 +194,7 @@ function renderFlow(days, ctx, bad) {
       return `<td${k ? ` class="${k}"` : ""}>${esc(cellV(c))}</td>`; }).join("") + "</tr>").join("");
   const unions = META.tiers.filter(t => t.union.length).map(t => `${t.label} = ${t.union.map(tierLabel).join("、")}任一路径到达（不是相加）`);
   const skips = META.tiers.filter(t => t.skip.length).map(t => `${t.label}没有「${t.skip.map(stepLabel).join("、")}」这一步，视为通过`);
+  requestAnimationFrame(() => { const t = $("#fFlow .ftab"), c = t && t.querySelector("th"); if (c) t.style.setProperty("--segw", c.getBoundingClientRect().width + "px"); });
   $("#fFlow").innerHTML = `<div class="scroll"><table class="ftab"><thead><tr>${header.map(x => `<th>${esc(x)}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table></div>` +
     `<p class="foot"><span class="core-key">粗体带竖条</span> = 核心链路。「较上一周」= 本窗口「较上一步」转化 − 上一段同长窗口（${toISO(P.d0).slice(5)}~${toISO(P.d1).slice(5)}），单位 pp；第一行为 UV 环比；|Δ| ≥ 1pp 着色，只作描述、不做显著性。` +
     (wow ? "" : ` <b class="warn-t">本列暂不可算：</b>${curFull ? `上一段（${toISO(P.d0)} ~ ${toISO(P.d1)}）有缺失或不完整的日期。<button type="button" class="btn" id="fillPrev">补同周期AA变化</button>（只拉上一段，当前窗口不动）` : "本窗口有缺失或不完整的日期，先点「从数据源刷新」补齐"}。`) +
@@ -319,7 +320,7 @@ function lineChart(el, days, series, yfmt, fit, tipHead, opt = {}) {
       if (days.length <= 14) s += se.pts.map((v, i) => v == null ? "" : `<circle cx="${x(i)}" cy="${y(v)}" r="3.5" fill="${se.color}" stroke="var(--card)" stroke-width="2"/>`).join("");
     }
     s += `<line class="cross" y1="${T}" y2="${H - B}" visibility="hidden"/><rect x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}" fill="transparent" class="hit"/></svg>`;
-    el.innerHTML = chartTop(legend) + s;
+    el.innerHTML = chartTop(legend) + s + (opt.note ? `<p class="foot chart-note">${esc(opt.note)}</p>` : "");
     const svg = el.querySelector("svg"), xh = svg.querySelector(".cross"), hit = svg.querySelector(".hit");
     const band = (se, i) => se.band && se.band[0][i] != null ? ` <span class="muted">[${yfmt(se.band[0][i])}, ${yfmt(se.band[1][i])}]</span>` : "";
     hit.addEventListener("mousemove", ev => {
@@ -492,15 +493,18 @@ let CUR_EXP = null;
 const STAGES = ["查生效", "判止损", "中期读数", "出结论"];
 const ROLE_NAME = { north_star: "北极星", process: "过程", guardrail: "护栏" };
 const expScopeText = e => scopeLabel(e.scope) + (e.subs && e.subs.length ? ` · ${e.subs.map(subLabel).join("/")}` : "");
-const statusText = s => ({ queued: "排队中", running: "跑数中", active: "续跑中", frozen: "已冻结", failed: "失败" }[s] || s);
+// active = 窗口没到结束日、每天定时自动补到前一天，平时并没有在跑；正在跑的是 queued / running
+const statusText = s => ({ queued: "排队中", running: "跑数中", active: "回收中", frozen: "已冻结", failed: "失败" }[s] || s);
+const expPill = e => `<span class="pill ${e.status}"${e.status === "active" ? ` title="每天 ${META.daily_at} 自动补到前一天"` : ""}>${statusText(e.status)}</span>`;
 
 async function loadExpList() {
   METRICS = await api("/api/metrics");
   const list = await api("/api/experiments");
   $("#expList").innerHTML = list.length ? list.map(e => `<div class="item ${e.id === CUR_EXP ? "on" : ""}" data-id="${e.id}">
       <div class="t">${esc(e.name)}</div>
-      <div class="m">${esc(expScopeText(e))} · ${toISO(e.start)} ~ ${toISO(e.end)} · <span class="pill ${e.status}">${statusText(e.status)}</span></div>
-      ${e.stage ? `<div class="stg"><span class="stage s-${STAGES.indexOf(e.stage.stage) + 1}">${esc(e.stage.stage)}</span>${e.stage.day ? `第 ${e.stage.day} 天` : ""}${e.stage.next ? ` · 下一节点 ${esc(e.stage.next)}` : ""} · ${e.last_end ? `数据到 ${toISO(e.last_end).slice(5)}` : "还没跑数"}</div>` : ""}
+      <div class="m">${esc(expScopeText(e))} · ${toISO(e.start)} ~ ${toISO(e.end)} · ${expPill(e)}</div>
+      ${e.stage ? `<div class="stg"><span class="stage s-${STAGES.indexOf(e.stage.stage) + 1}">${esc(e.stage.stage)}</span>${[e.stage.day ? `第 ${e.stage.day} 天` : "", e.stage.next ? `下一节点 ${esc(e.stage.next)}` : "",
+        e.last_end ? `数据到 ${toISO(e.last_end).slice(5)}` : e.stage.stage === "未开窗" ? "" : "还没跑数"].filter(Boolean).join(" · ")}</div>` : ""}
     </div>`).join("") : `<p class="muted">还没有实验，点右上角「新建回收」。</p>`;
   $$("#expList .item").forEach(it => it.onclick = () => openExp(+it.dataset.id));
   if (!CUR_EXP && list.length) CUR_EXP = list[0].id;
@@ -619,7 +623,7 @@ let SUM_TEXT = "";
 function renderExp(e) {
   const v = e.view, C = META.cadence, alpha = META.alpha;
   const name = id => { const g = e.groups.find(x => x.id === id); return g ? `${g.label && g.label !== g.id ? esc(g.label) + " · " : ""}${esc(g.id)}` : esc(id); };
-  let h = `<div class="bar"><div><h1>${esc(e.name)}</h1><div class="muted">${esc(expScopeText(e))} · ${toISO(e.start)} ~ ${toISO(e.end)}${e.last_end ? ` · 已跑到 ${toISO(e.last_end)}` : ""} · <span class="pill ${e.status}">${statusText(e.status)}</span></div></div>
+  let h = `<div class="bar"><div><h1>${esc(e.name)}</h1><div class="muted">${esc(expScopeText(e))} · ${toISO(e.start)} ~ ${toISO(e.end)}${e.last_end ? ` · 已跑到 ${toISO(e.last_end)}` : ""} · ${expPill(e)}</div></div>
     <div class="controls"><button class="btn" id="editExp">编辑</button><button class="btn" id="rerun">重跑</button><button class="btn danger" id="delExp">删除</button></div></div>`;
   if (EDIT_NOTE && EDIT_NOTE.id === e.id) h += `<div class="notice info"><b>已编辑</b>${esc(EDIT_NOTE.text)}</div>`;
   if (e.status === "failed") h += `<div class="notice crit"><b>失败</b>${esc(e.error)}</div>`;
@@ -735,7 +739,7 @@ function expTables(e, tables, baseId) {
     for (const g of trts) header.push(`实验 ${lab(g)}`, multi ? `Δ（${g.label || g.id}）` : "Δ", "z");
     header.push("判读");
     const rows = t.rows.map(r => {
-      const out = [{ v: r.label, cls: r.type === "day" ? "" : "sum" }, val(t, r.groups[ctrl.id])];
+      const out = [{ v: r.label + (r.thin ? "（样本不足）" : ""), cls: r.type === "day" ? "" : "sum" }, val(t, r.groups[ctrl.id])];
       for (const g of trts) {
         const c = r.vs[g.id];
         out.push(val(t, r.groups[g.id]), { v: delta(t, c, r.groups[ctrl.id], r.groups[g.id]), cls: cls(c) }, t.kind === "ratio" && c && c.z != null ? sgn(c.z, 2) : "—");
@@ -773,7 +777,9 @@ const gColor = (e, id) => `var(--s${Math.min(e.groups.findIndex(g => g.id === id
 function drawTrend(e, x, id, baseId) {
   const el = $("#" + id), t = x.src, base = e.groups.find(g => g.id === baseId) || e.groups.find(g => g.role === "control");
   const others = e.groups.filter(g => g.id !== base.id);
-  const rows = t.rows.filter(r => r.type === "day"), days = rows.map(r => r.date);
+  const all = t.rows.filter(r => r.type === "day"), days = all.map(r => r.date);
+  // 样本不足的天（后端 thin，如实验中途关停后的残留流量）不画点；表格照常列出
+  const rows = all.map(r => r.thin ? { ...r, groups: {}, vs: {} } : r), note = thinNote(all.filter(r => r.thin).map(r => r.date));
   const lab = g => gLab(g) + (g.id === base.id ? "（基准）" : "");
   const title = `${e.name} · ${x.title}`;
   if (t.kind === "ratio" && (S.tmode || "diff") === "diff") {
@@ -782,14 +788,15 @@ function drawTrend(e, x, id, baseId) {
     const series = others.map(g => { const cs = rows.map(r => r.vs[g.id]);
       return { name: `${gLab(g)} − ${gLab(base)}`, color: gColor(e, g.id), pts: cs.map(dv), band: [cs.map(lo), cs.map(hi)] }; });
     const yfmt = v => v == null ? "—" : pp ? sgn(v * 100, 2) + "pp" : sgn(v * 100, 1) + "%";
-    lineChart(el, days, series, yfmt, true, null, { zero: true, key: id + ":diff:" + t.key, title: title + `（逐日差值，${pp ? "百分点" : "相对差"}，95% CI）` });
+    lineChart(el, days, series, yfmt, true, null, { zero: true, key: id + ":diff:" + t.key, title: title + `（逐日差值，${pp ? "百分点" : "相对差"}，95% CI）`, note });
     return;
   }
   const pick = t.kind === "ratio" ? x2 => x2 ? x2.value : null : x2 => x2 && x2.q[0] != null ? x2.q[0] : null;
   const series = [base, ...others].map(g => ({ name: lab(g) + (t.kind === "ratio" ? "" : " P50"), color: gColor(e, g.id), pts: rows.map(r => pick(r.groups[g.id])) }));
   const yfmt = v => v == null ? "—" : t.kind !== "ratio" ? Math.round(v) + " ms" : t.unit !== "num" ? (v * 100).toFixed(v < 0.1 ? 2 : 1) + "%" : v.toFixed(2);
-  lineChart(el, days, series, yfmt, true, null, { key: id + ":val:" + t.key, title: title + "（逐日取值）" });
+  lineChart(el, days, series, yfmt, true, null, { key: id + ":val:" + t.key, title: title + "（逐日取值）", note });
 }
+const thinNote = ds => ds.length ? `${ds.map(d => toISO(d).slice(5)).join("、")} 样本不足（设备数不到本组单日最高值的 30%），图上不画点；累计读数照常计入。` : "";
 
 // ─────────── 读数可视化 ───────────
 const TRT = {};   // TRT[实验 id] = 指标卡当前看的组
@@ -912,10 +919,10 @@ function entryChart(el, e, dist) {
 // ─────────── 指标库 ───────────
 async function loadMetrics() {
   METRICS = await api("/api/metrics");
-  $("#metricList").innerHTML = `<table><thead><tr><th>指标</th><th>类型</th><th></th></tr></thead><tbody>` + METRICS.map(m => `<tr>
-    <td class="name" style="text-align:left;white-space:normal">${esc(m.name)}<br><small class="muted">${esc(m.key)} · ${esc(m.note || "")}</small></td>
+  $("#metricList").innerHTML = `<div class="scroll"><table><thead><tr><th>指标</th><th>类型</th><th></th></tr></thead><tbody>` + METRICS.map(m => `<tr>
+    <td class="name">${esc(m.name)}<small class="muted">${esc(m.key)} · ${esc(m.note || "")}</small></td>
     <td>${m.kind === "quantile" ? "分位数" : "比率"}${m.preset ? ' <span class="pill">预置</span>' : ""}</td>
-    <td class="acts"><button class="btn" data-edit="${m.key}">编辑</button>${m.preset ? (m.edited ? ` <span class="pill warn">已改</span>` : "") : ` <button class="btn danger" data-del="${m.key}">删除</button>`}</td></tr>`).join("") + `</tbody></table>`;
+    <td class="acts"><button class="btn" data-edit="${m.key}">编辑</button>${m.preset ? (m.edited ? ` <span class="pill warn">已改</span>` : "") : ` <button class="btn danger" data-del="${m.key}">删除</button>`}</td></tr>`).join("") + `</tbody></table></div>`;
   $$("[data-del]").forEach(b => b.onclick = async () => {
     const used = await api(`/api/metrics/${b.dataset.del}/usage`);
     if (!confirm(used.length ? `「${b.dataset.del}」被 ${used.length} 个实验用到（${used.map(e => e.name).join("、")}），删了这些实验里就看不到它了。仍要删？` : `删除指标「${b.dataset.del}」？`)) return;

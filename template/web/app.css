@@ -216,6 +216,12 @@ th, td { padding: 7px 10px; border-bottom: 1px solid var(--grid); text-align: ri
 th { color: var(--ink-2); font-weight: 500; font-size: 12px; position: sticky; top: 0; background: var(--surface); border-bottom-color: var(--axis); }
 tbody tr:hover td { background: var(--hover); }
 td:first-child, th:first-child { text-align: left; }
+/* 第一列（指标 / 日期）一行写完、横滑时冻结在左侧。实底色防透出；悬停 / 警示底色叠在实底上 */
+td:first-child, th:first-child { position: sticky; left: 0; z-index: 1; white-space: nowrap; }
+td:first-child { background: var(--card); box-shadow: inset -1px 0 0 var(--grid); }
+th:first-child { z-index: 2; box-shadow: inset -1px 0 0 var(--axis); }
+tbody tr:hover td:first-child { background: linear-gradient(var(--hover), var(--hover)), var(--card); }
+tr.bad td:first-child { background: linear-gradient(var(--warn-bg), var(--warn-bg)), var(--card); }
 tr.bad td { background: var(--warn-bg); }
 .flag { color: var(--crit); font-weight: 600; }
 .foot { font-size: 12px; color: var(--muted); line-height: 1.7; }
@@ -259,7 +265,6 @@ input[type=checkbox] { accent-color: var(--ui); }
 .dtab2 td, .dtab2 th, .otab td, .otab th { padding: 6px 10px; }
 .dtab2 th, .otab th { text-align: right; }
 .dtab2 th:first-child, .otab th:first-child { text-align: left; }
-.otab td:first-child { white-space: normal; min-width: 12em; }
 .dtab2 tr.cum td { background: var(--surface); }
 .dtab2 tr.total td { background: var(--surface); border-top: 1px solid var(--axis); font-weight: 600; }
 .dtab2 tr.total td.up, .dtab2 tr.total td.down, .dtab2 td.up, .dtab2 td.down, .otab td.up, .otab td.down { font-weight: 600; }
@@ -308,8 +313,13 @@ details.trend summary { cursor: pointer; font-size: 12px; color: var(--ink-2); }
 .ftab th:nth-child(-n+2) { text-align: left; }
 .ftab td { text-align: right; }
 .ftab td.segc { text-align: left; vertical-align: top; color: var(--muted); font-size: 12px; white-space: nowrap; border-right: 1px solid var(--grid); }
-.ftab tbody tr:hover td.segc { background: transparent; }
-.ftab td.lab { text-align: left; }
+.ftab tbody tr:hover td.segc { background: var(--card); }
+.ftab td.lab { text-align: left; white-space: nowrap; }
+/* 漏斗总表：段名（rowspan）+ 环节两列一起冻结；段名列宽由 JS 量好写进 --segw */
+.ftab td.lab, .ftab th:nth-child(2) { position: sticky; left: var(--segw, 0px); z-index: 1; background: var(--card); box-shadow: inset -1px 0 0 var(--grid); }
+.ftab th:nth-child(2) { z-index: 2; background: var(--surface); box-shadow: inset -1px 0 0 var(--axis); }
+.ftab tbody tr:hover td.lab { background: linear-gradient(var(--hover), var(--hover)), var(--card); }
+.ftab td.lab.core { box-shadow: inset 3px 0 0 var(--s1), inset -1px 0 0 var(--grid); }
 .ftab td.ts { border-left: 1px solid var(--grid); }
 .ftab tr.seg-start td { border-top: 1px solid var(--axis); }
 .ftab tbody tr:first-child td { border-top: 0; }
@@ -321,6 +331,7 @@ details.trend summary { cursor: pointer; font-size: 12px; color: var(--ink-2); }
 .ftab td.wdn { color: var(--crit); font-weight: 600; }
 .ftab th, .ftab td { padding: 7px 7px; }
 .ftab th { white-space: normal; line-height: 1.3; vertical-align: bottom; }
+.ftab th:nth-child(-n+2) { white-space: nowrap; }
 .steps .row.gap { margin-top: 18px; }
 .steps .row.core .lbl { color: var(--ink); font-weight: 600; }
 .steps3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px 36px; }
@@ -376,6 +387,8 @@ details.trend summary { cursor: pointer; font-size: 12px; color: var(--ink-2); }
 .jtab { table-layout: auto; }
 .jtab th:nth-child(-n+3), .jtab td:nth-child(-n+3) { text-align: left; }
 .jtab td.tgt { white-space: normal; min-width: 14em; }
+/* 任务日志的展开明细行 / 错误行是一整格 colspan，不冻结 */
+.jtab tr.jerr > td:first-child, .jtab tr.jdet > td:first-child { position: static; box-shadow: none; white-space: normal; }
 .jtab tr.jerr td { white-space: normal; padding-top: 0; }
 .jtab tr.jerr:hover td, .jtab tr.jdet:hover > td { background: transparent; }
 .jtab tr.jdet > td { background: var(--surface); text-align: left; white-space: normal; max-width: 0; }
@@ -391,4 +404,7 @@ details.trend summary { cursor: pointer; font-size: 12px; color: var(--ink-2); }
 .stage { font-size: 11px; font-weight: 600; padding: 0 8px; border-radius: 9px; background: var(--sel); color: var(--ink-2); line-height: 18px; }
 .stage.s-4 { background: var(--ui); color: var(--on-ui); }
 #metricList td.acts { white-space: nowrap; }
+/* 指标名一行写完；下面的 key · 说明照常折行，限宽免得把指标列撑太宽 */
+#metricList td.name small { display: block; white-space: normal; max-width: 28em; }
 .pill.warn { background: var(--warn-bg); color: var(--ink-2); }
+.chart-note { margin: 6px 0 0; }
