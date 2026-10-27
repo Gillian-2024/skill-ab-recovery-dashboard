@@ -132,7 +132,8 @@ class _Env(unittest.TestCase):
         c["data_dir"] = cls.tmp
         if HAS_DUCKDB:
             cls.db = os.path.join(cls.tmp, "demo.duckdb")
-            out = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "demo_data.py"), cls.db, "--users", "4000"],
+            # 4000 用户时埋的 +12% 点击只到 z≈1~4（开窗日跟着「今天」走，抽样也跟着变），有时不显著；12000 用户稳定在 z≈5
+            out = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "demo_data.py"), cls.db, "--users", "12000"],
                                  check=True, capture_output=True, text=True).stdout
             cls.marks = dict(kv.split("=") for kv in out.strip().splitlines()[-1].split())
             c["source"]["path"] = cls.db
@@ -246,6 +247,21 @@ class EndToEndTest(_Env):
         cb = next(r for r in {x["key"]: x for x in vb["tables"]}["click_rate"]["rows"] if r["type"] == "total")["vs"]["G100"]
         self.assertAlmostEqual(cb["diff"], -tot("click_rate")["diff"])
         self.assertEqual(vb["summary"], v["summary"])
+        # 修正标注：北极星不进 BH；冻结后最后一次看数阈值 ≈ 1.98，埋的效果 z≈5 修正后仍显著
+        a = tot("click_rate")["adj"]
+        self.assertIsNone(a["bh"])
+        self.assertTrue(a["ok"])
+        # CUPED：上线前只有几天演示数据，照样能出；方差不升、与原读数同向
+        cp = v["cuped"]["metrics"]["click_rate"]["G101"]
+        self.assertGreaterEqual(cp["var_cut"], 0)
+        self.assertGreater(cp["diff"], 0)
+        self.assertAlmostEqual(cp["raw_diff"], tot("click_rate")["diff"], places=9)
+        # 分群：配置里的三列都出；各群设备数加起来 = 分流检查设备数
+        sg = {d["dim"]: d for d in v["seg"]["dims"]}
+        self.assertEqual(set(sg), {"region", "entry", "platform"})
+        m = next(x for x in sg["region"]["metrics"] if x["key"] == "click_rate")
+        self.assertEqual(sum(c["n"]["G100"] for c in m["cells"]), v["srm"]["counts"]["G100"])
+        self.assertIsNotNone(m["het"])
         sm = v["summary"]
         self.assertEqual(sm["state"], "ok")
         self.assertEqual(sm["head"]["stage"], "出结论")

@@ -528,13 +528,14 @@ def _roll(metrics, caps):
     return roll
 
 
-def _dev_sql(scope, gids, d0, d1, metrics, caps, subs, first=False):
-    """设备层：每设备一行 grp + xx_k / yy_k；全窗口比率与分布共用同一并集口径。first = 带上首次带组号的日期。"""
+def _dev_sql(scope, gids, d0, d1, metrics, caps, subs, first=False, keep_id=False):
+    """设备层：每设备一行 grp + xx_k / yy_k；全窗口比率与分布共用同一并集口径。first = 带上首次带组号的日期；
+    keep_id = 带上设备列 u（CUPED / 分群要按设备 JOIN，外层仍只出聚合）。"""
     dd = _dd_sql(scope, gids, d0, d1, metrics, caps, subs)
     grp, _ = _grp_case(gids, "a")
     aflags = ", ".join("MAX(f%d) AS a%d" % (i, i) for i in range(len(gids)))
     return f"""
-  SELECT grp, {"first_date, " if first else ""}{", ".join(_adj(metrics, caps))}
+  SELECT {"u, " if keep_id else ""}grp, {"first_date, " if first else ""}{", ".join(_adj(metrics, caps))}
   FROM (
     SELECT {grp} AS grp, v.*
     FROM (
@@ -555,6 +556,100 @@ SELECT grp, COUNT(*) AS n, {", ".join(_stats_cols(metrics))}
 FROM ({_dev_sql(scope, gids, d0, d1, metrics, caps, subs)}
 ) a
 GROUP BY grp"""
+
+
+CUPED_V = "xyab"   # x / y = 实验期分子 / 分母；a / b = 上线前同口径分子 / 分母
+
+
+def cuped_metrics(metrics):
+    """能做 CUPED 的比率指标：不带 device_scope（上线前没有对应的设备范围定义）。"""
+    return [m for m in metrics if not m["def"].get("device_scope")]
+
+
+def _pre_dev_sql(scope, p0, p1, metrics, caps, subs):
+    """上线前（p0~p1）每设备一行 px_k / py_k：口径同实验期（同一 P99 封顶、窗口内并集、分子只算分母设备），不认组。"""
+    conds, cols = _ratio_cols(metrics)
+    xd = ", ".join("%s AS xd_%s" % (_day_x(m, caps), m["key"]) for m in metrics)
+    roll = [c.replace(" AS x_", " AS px_").replace(" AS y_", " AS py_") for c in _roll(metrics, caps)]
+    return f"""
+      SELECT pu, {", ".join(roll)}
+      FROM (
+        SELECT d.*, {xd}
+        FROM (
+          SELECT {DEV()} AS pu, {DT()} AS dd, {", ".join(cols)}
+          FROM (
+            SELECT {_ev_cols()}
+            FROM {T()}
+            WHERE {where_dates(p0, p1)} AND {where_scope(scope, subs)}
+              AND ({" OR ".join("(%s)" % c for c in sorted(conds))})
+          ) ev
+          GROUP BY {DEV()}, {DT()}
+        ) d
+      ) pd
+      GROUP BY pu"""
+
+
+def experiment_cuped_sql(scope, gids, d0, d1, metrics, caps, subs, p0, p1):
+    """CUPED 原料：实验期设备层（同全窗口比率）LEFT JOIN 上线前设备层，每组一行：n + 四个变量的和 + 两两乘积和。
+    上线前没有行为的设备 a = b = 0（照样计入：协变量是上线前就定了的，不受实验影响）。"""
+    ms = cuped_metrics(metrics)
+    agg = ["COUNT(*) AS n"]
+    for m in ms:
+        k = m["key"]
+        v = {"x": "xx_%s" % k, "y": "yy_%s" % k, "a": "COALESCE(px_%s, 0)" % k, "b": "COALESCE(py_%s, 0)" % k}
+        for i, p in enumerate(CUPED_V):
+            agg.append("SUM(%s) AS s%s_%s" % (v[p], p, k))
+            for q_ in CUPED_V[i:]:
+                agg.append("SUM(%s * %s) AS s%s%s_%s" % (v[p], v[q_], p, q_, k))
+    return f"""
+SELECT grp, {", ".join(agg)}
+FROM ({_dev_sql(scope, gids, d0, d1, ms, caps, subs, keep_id=True)}
+) p
+LEFT JOIN ({_pre_dev_sql(scope, p0, p1, ms, caps, subs)}
+) r ON p.u = r.pu
+GROUP BY grp"""
+
+
+SEG_NA, SEG_OTHER = "@na", "@other"   # 分群取值里的「未知」「其他」：带 @ 不会和真实取值撞
+
+
+def _seg_dev_sql(scope, d0, d1, subs, col):
+    """每设备一个分群取值 = 窗口内认组事件上该列的最大值（列值多数设备在窗口内不变；变了取其一）。不要求事件带组号：组号已由设备层认定。"""
+    ide = _cfg()["experiment"]["identify_events"]
+    ev = (" AND %s IN (%s)" % (EV(), ", ".join("'%s'" % _sq(e) for e in ide))) if ide else ""
+    return f"""
+      SELECT {DEV()} AS su, 1 AS hit, MAX({q(col)}) AS sv
+      FROM {T()}
+      WHERE {where_dates(d0, d1)} AND {where_scope(scope, subs)}{ev}
+      GROUP BY {DEV()}"""
+
+
+def experiment_seg_sql(scope, gids, d0, d1, metrics, caps, subs, seg):
+    """分群充分统计量：每组 × 分群取值一行（只出聚合）。seg = experiment.segments 的一项；
+    取值只单列设备数最多的前 top 个，其余并成「其他」，免得行数随取值个数膨胀。"""
+    col = seg["column"]
+    if col not in str_cols():
+        raise MetricError("分群列不在 table.columns.string 白名单：%s" % col)
+    sd = _seg_dev_sql(scope, d0, d1, subs, col)
+    vals = ", ".join("p.xx_{k}, p.yy_{k}".format(k=m["key"]) for m in metrics)
+    # 「JOIN 不上」用标记列 hit 判断，输出列只引用聚合后的取值，不引用设备列
+    key = ("CASE WHEN s.hit IS NULL OR s.sv IS NULL THEN '%s' WHEN tr.top_v IS NULL THEN '%s' ELSE s.sv END AS d_v"
+           % (SEG_NA, SEG_OTHER))
+    return f"""
+SELECT grp, d_v, COUNT(*) AS n, {", ".join(_stats_cols(metrics))}
+FROM (
+  SELECT p.grp, {vals}, {key}
+  FROM ({_dev_sql(scope, gids, d0, d1, metrics, caps, subs, keep_id=True)}
+  ) p
+  LEFT JOIN ({sd}
+  ) s ON p.u = s.su
+  LEFT JOIN (
+    SELECT sv AS top_v, DENSE_RANK() OVER (ORDER BY cnt DESC, sv) AS rk
+    FROM (SELECT sv, COUNT(*) AS cnt FROM ({sd}
+    ) s0 WHERE sv IS NOT NULL GROUP BY sv) rc
+  ) tr ON s.sv = tr.top_v AND tr.rk <= {int(seg["top"])}
+) a
+GROUP BY grp, d_v"""
 
 
 DIST_Q = (0.05, 0.25, 0.5, 0.75, 0.95)

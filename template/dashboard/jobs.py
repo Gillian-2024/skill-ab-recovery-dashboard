@@ -1,5 +1,6 @@
 """后台任务：漏斗刷新、实验回收。单线程串行执行（数仓并发不可控，串行最稳）。"""
 import datetime as dt
+import functools
 import threading
 import time
 import traceback
@@ -150,6 +151,92 @@ def _run_dist(src, e, mm, gids, subs, d0, d1, caps):
     store.save_exp_results(e["id"], "@dist", out, d1)
 
 
+# 只做可视化 / 辅助读数、不进结论提要的补算项：不挡结论
+VIS_KEYS = ("@dist", "@cuped", "@seg")
+VIS_LABELS = ("分布 / 进组趋势", "CUPED", "分群下钻")
+
+
+def md_(d):
+    s = str(d)
+    return "%s-%s" % (s[4:6], s[6:])
+
+
+def cuped_window(e, exps=None):
+    """协变量窗口 = 上线前 cuped_pre_days 天。同一范围内有别的实验用过本实验的分组号、且跑在这段时间里的（分组号被复用），
+    窗口起点挪到那个实验结束日的次日：那段时间同一批设备已按上一个实验分组、用着它的策略，协变量会和分组相关，CUPED 就有偏。
+    返回 (p0, p1, 说明)；p0 > p1 = 没有干净的窗口，不做 CUPED。"""
+    cfg = C.cfg["experiment"]
+    pre_n, min_n = int(cfg["cuped_pre_days"]), int(cfg["cuped_min_days"])
+    launch = parse(e.get("launch") or e["start"])
+    p1 = ymd(launch - dt.timedelta(days=1))
+    if pre_n <= 0:
+        return ymd(launch), p1, "配置里关闭了 CUPED（experiment.cuped_pre_days = 0）"
+    p0 = ymd(launch - dt.timedelta(days=pre_n))
+    ids = {g["id"] for g in e["groups"]}
+    hit = [o for o in (exps if exps is not None else store.experiments()) if o["id"] != e["id"] and o["scope"] == e["scope"]
+           and ids & {g["id"] for g in o["groups"]} and int(o["start"]) <= p1 and int(o.get("last_end") or o["end"]) >= p0]
+    if not hit:
+        return p0, p1, ""
+    o = max(hit, key=lambda o: int(o.get("last_end") or o["end"]))
+    oend = o.get("last_end") or o["end"]
+    p0 = ymd(parse(oend) + dt.timedelta(days=1))
+    if (parse(p1) - parse(p0)).days + 1 < min_n:
+        return p0, ymd(parse(p0) - dt.timedelta(days=1)), "上线前 %d 天内同一批分组号在「%s」里跑过（到 %s），剩下的干净窗口不足 %d 天" % (
+            pre_n, o["name"], md_(oend), min_n)
+    return p0, p1, "上线前 %d 天内同一批分组号在「%s」里跑过（到 %s），协变量窗口从 %s 起" % (pre_n, o["name"], md_(oend), md_(p0))
+
+
+def _cuped_window_changed(e):
+    """已存的 CUPED 协变量窗口和按现在的规则 / 配置算出来的不一样 → 要重算。"""
+    raw = next((r["payload"] for r in e.get("results") or [] if r["metric_key"] == "@cuped" and r["grp"] == "@pre"), None)
+    if raw is None:
+        return False
+    p0, p1, _ = cuped_window(e)
+    return (raw.get("p0"), raw.get("p1")) != (p0, p1)
+
+
+def _node_bucket(d0, d):
+    """数据到 d 时所处的节点段 = 已过的最后一个节点（判止损 / 中期读数 / 出结论）；判止损之前 = 0。"""
+    n = (parse(d) - parse(d0)).days + 1
+    cad = C.cfg["experiment"]["cadence"]
+    return max([k for k in (cad["stop_loss"], cad["interim"], cad["final"]) if k <= n] or [0])
+
+
+def _ratio_ms(e, mm):
+    return [{"key": k, "name": mm[k]["name"], "def": mm[k]} for k in e["metric_keys"] if k in mm and _kind(mm[k]) == "ratio"]
+
+
+def _run_cuped(src, e, mm, gids, subs, d0, d1, caps):
+    """CUPED 原料（全窗口累计）：实验期设备层 × 上线前同口径设备层。"""
+    ms = sqlgen.cuped_metrics(_ratio_ms(e, mm))
+    if not ms:
+        return
+    p0, p1, why = cuped_window(e)
+    if p0 > p1:
+        store.save_exp_results(e["id"], "@cuped", {"@pre": {"p0": p0, "p1": p1, "skip": why}}, d1)
+        return
+    rows = src.dicts(sqlgen.experiment_cuped_sql(e["scope"], gids, d0, d1, ms, caps, subs, p0, p1), "CUPED ×%d" % len(ms))
+    f = ["s" + a for a in sqlgen.CUPED_V] + ["s" + a + b for i, a in enumerate(sqlgen.CUPED_V) for b in sqlgen.CUPED_V[i:]]
+    out = {str(r["grp"]): {m["key"]: dict(n=int(r["n"]), **{x: float(r.get("%s_%s" % (x, m["key"])) or 0) for x in f})
+                           for m in ms} for r in map(_lower, rows)}
+    out["@pre"] = {"p0": p0, "p1": p1, "cut": why, "d1": d1}
+    store.save_exp_results(e["id"], "@cuped", out, d1)
+
+
+def _run_seg(src, e, mm, gids, subs, d0, d1, caps):
+    """分群充分统计量：每个分群列一次查询。"""
+    ms, segs = _ratio_ms(e, mm), C.cfg["experiment"]["segments"]
+    if not ms or not segs:
+        return
+    out = {}
+    for sg in segs:
+        rows = src.dicts(sqlgen.experiment_seg_sql(e["scope"], gids, d0, d1, ms, caps, subs, sg), "分群 %s" % sg["label"])
+        out[sg["column"]] = [dict({"grp": str(r["grp"]), "n": int(r["n"]), "v": str(r["d_v"])},
+                                  **{"%s_%s" % (f, m["key"]): float(r.get("%s_%s" % (f, m["key"])) or 0) for m in ms for f in STAT_F})
+                             for r in map(_lower, rows)]
+    store.save_exp_results(e["id"], "@seg", {"_": out, "d1": d1}, d1)
+
+
 def run_experiment(jid, p):
     log = lambda s: store.job_log(jid, s)
     e = store.experiment(int(p["exp_id"]))
@@ -157,7 +244,7 @@ def run_experiment(jid, p):
         raise RuntimeError("实验不存在")
     store.update_experiment(e["id"], status="running", error=None)
     try:
-        _run_experiment(e, log, p.get("only"), p.get("only_daily"), jid=jid)
+        _run_experiment(e, log, p.get("only"), p.get("only_daily"), jid=jid, refresh_vis=p.get("refresh_vis"))
     except Cancelled:
         raise                             # 实验状态由 _after_cancel 统一处理
     except Exception as ex:
@@ -165,7 +252,7 @@ def run_experiment(jid, p):
         raise
 
 
-def _run_experiment(e, log, only=None, only_daily=None, jid=None):
+def _run_experiment(e, log, only=None, only_daily=None, jid=None, refresh_vis=False):
     """only / only_daily 不为 None = 编辑后的增量补算：只算新增指标 / 新增 By天，窗口沿用已跑到的日期。"""
     incr = only is not None
     mm = store.metric_map()
@@ -210,14 +297,21 @@ def _run_experiment(e, log, only=None, only_daily=None, jid=None):
     dm = [{"key": k, "def": mm[k]} for k in e["metric_keys"] if k in daily and k in mm]
     any_ratio = any(_kind(mm[k]) == "ratio" for k in e["metric_keys"] if k in mm)
     pending = ["@cum"] if cum_cutoffs(d0, d1) and any_ratio else []
-    # 分布 + 进组趋势：窗口变了 / 新增比率指标 / 还没算过 → 重算（只读数可视化用，不进判读）
-    have = {r["metric_key"] for r in e.get("results") or []}
-    if any_ratio and (not incr or any(_kind(m["def"]) == "ratio" for m in metrics) or "@dist" not in have):
-        pending.append("@dist")
+    # 辅助读数（不进判读）：分布每次续跑都算；CUPED / 分群各要整窗口再扫一遍，只在跨节点、冻结、缺 / 失败、新增指标时重算
+    have = {r["metric_key"]: r["run_end"] for r in e.get("results") or []}
+    new_ratio = any(_kind(m["def"]) == "ratio" for m in metrics)
+    frozen = d1 >= int(e["end"])
+    for k in VIS_KEYS if any_ratio else ():
+        if k == "@seg" and not C.cfg["experiment"]["segments"]:
+            continue
+        heavy = k != "@dist"
+        if refresh_vis or k not in have or e.get("vis_error") or (incr and new_ratio) or \
+                (k == "@cuped" and _cuped_window_changed(e)) or (not heavy and not incr) or \
+                (heavy and not incr and (frozen and int(have[k]) != d1 or _node_bucket(d0, int(have[k])) != _node_bucket(d0, d1))):
+            pending.append(k)
     pending += [m["key"] + "@day" for m in dm if _kind(m["def"]) == "ratio"]
     pending += [m["key"] for m in metrics if _kind(m["def"]) == "quantile"]
     pending += [m["key"] + "@day" for m in dm if _kind(m["def"]) == "quantile"]
-    frozen = d1 >= int(e["end"])
     store.update_experiment(e["id"], status="frozen" if frozen else "active", last_end=d1, error=None, pending=pending)
     log("完成：窗口 %d~%d%s" % (d0, d1, "，已到结束日，冻结" if frozen else "，结束日前每日续跑"))
     if pending:
@@ -247,7 +341,7 @@ def run_exp_followup(jid, p):
     gids = [g["id"] for g in e["groups"]]
     subs = e.get("subs") or []
     d0, d1 = int(e["start"]), int(p["run_end"])
-    pending = [k for k in e["pending"] if k in ("@cum", "@dist") or k.split("@")[0] in mm]
+    pending = [k for k in e["pending"] if k in ("@cum",) + VIS_KEYS or k.split("@")[0] in mm]
     caps = dict(e.get("caps") or {})
     partial, stopped = [], False
 
@@ -284,6 +378,17 @@ def run_exp_followup(jid, p):
                     partial.append("分布 / 进组趋势：%s" % str(ex)[:200])
                     log("⚠ 分布 / 进组趋势失败，其余照常：%s" % ex)
                 done(["@dist"])
+            # CUPED / 分群下钻：失败不影响主读数
+            for k, fn, label in (("@cuped", _run_cuped, "CUPED"), ("@seg", _run_seg, "分群下钻")):
+                if k in pending:
+                    try:
+                        fn(src, e, mm, gids, subs, d0, d1, caps)
+                    except Cancelled:
+                        raise
+                    except Exception as ex:
+                        partial.append("%s：%s" % (label, str(ex)[:200]))
+                        log("⚠ %s 失败，其余照常：%s" % (label, ex))
+                    done([k])
             rk = [k for k in pending if k.endswith("@day") and _kind(mm[k[:-4]]) == "ratio"]
             if rk:
                 ms = [{"key": k[:-4], "name": mm[k[:-4]]["name"], "def": mm[k[:-4]]} for k in rk]
@@ -321,10 +426,13 @@ def run_exp_followup(jid, p):
         partial.append(str(ex)[:300])
         raise
     finally:
-        err = "补算失败（可点重跑）：" + "；".join(partial) if partial else None
+        # 只是辅助读数（分布 / CUPED / 分群）失败：记在 vis_error，不写 error（error 会挡结论提要）
+        main = [x for x in partial if not x.startswith(VIS_LABELS)]
+        vis = [x for x in partial if x.startswith(VIS_LABELS)]
+        err = "补算失败（可点重跑）：" + "；".join(main) if main else None
         if stopped:
-            err = "补算已取消（已出的结果保留，可点重跑）" + ("；另有失败：" + "；".join(partial) if partial else "")
-        store.update_experiment(e["id"], pending=[], error=err)
+            err = "补算已取消（已出的结果保留，可点重跑）" + ("；另有失败：" + "；".join(main) if main else "")
+        store.update_experiment(e["id"], pending=[], error=err, vis_error="；".join(vis) if vis else None)
     log("补算完成")
 
 
@@ -358,6 +466,66 @@ def _row_stats(per, ctrl, trts, lower):
             x["read"] = ("显著正向" if (x["diff"] > 0) != lower else "显著负向") if sig else None
             vs[t] = x
     return groups, vs
+
+
+@functools.lru_cache(maxsize=256)
+def _seq_bound(n, planned, final, harm, alpha, looks_cfg):
+    looks = [d for d in looks_cfg if d < n and d < planned] + [n]
+    fr = [min(d / float(planned), 1.0) for d in looks]
+    if final:
+        fr[-1] = 1.0
+    return stats.gs_bounds(fr, alpha, "pocock" if harm else "obf")[-1]
+
+
+def seq_bound(n, planned, final, harm):
+    """第 n 天累计读数的序贯 |z| 阈值：看数节点 = 早于 n 的判止损 / 中期读数节点 + 本次；信息比例按天数 ÷ 计划窗口天数近似，
+    窗口已结束（final）本次按 1。收益侧 O'Brien-Fleming 型消耗（早期严），变差侧 Pocock 型（早期也能报警）；整体双侧 α = experiment.alpha。"""
+    cfg = C.cfg["experiment"]
+    cad = cfg["cadence"]
+    return _seq_bound(n, planned, final, harm, float(cfg["alpha"]), (cad["stop_loss"], cad["interim"]))
+
+
+def adjust_reads(e, tables):
+    """在原判读（p < alpha）之外加两层修正标注，原 read 不动：
+    ① 多次看数（序贯）：本行 |z| 是否过了该天数的序贯阈值；
+    ② 多指标多组（Benjamini-Hochberg，FDR = alpha）：同一累计行上，北极星以外的比率指标 × 实验组一起修正；北极星是事先指定的主指标，不进族。
+    c["adj"] = {bound, seq, bh, ok, why}；ok = 原判读显著且两层都过。"""
+    if not e.get("last_end"):
+        return tables
+    alpha = float(C.cfg["experiment"]["alpha"])
+    d0, d1, d2 = parse(e["start"]), parse(e["last_end"]), parse(e["end"])
+    planned = (d2 - d0).days + 1
+    final = e.get("status") == "frozen" or d1 >= d2
+    fam = {}
+    for t in tables:
+        if t["kind"] != "ratio":
+            continue
+        for r in t["rows"]:
+            if r["type"] not in ("cum", "total"):
+                continue
+            for g, c in r["vs"].items():
+                if c.get("z") is None:
+                    continue
+                harm = (c["diff"] > 0) == bool(t["lower_is_better"])
+                b = seq_bound(r["days"], planned, final and r["type"] == "total", harm)
+                c["adj"] = {"bound": b, "seq": abs(c["z"]) >= b, "bh": None}
+                if t["role"] != "north_star":
+                    fam.setdefault(r["days"], []).append(c)
+    for cs in fam.values():
+        for c, ok in zip(cs, stats.bh_pass([c["p"] for c in cs], alpha)):
+            c["adj"]["bh"] = ok
+    for t in tables:
+        for r in t["rows"]:
+            for c in r["vs"].values():
+                a = c.get("adj")
+                if not a:
+                    continue
+                why = [] if a["seq"] else ["多次看数阈值 |z| ≥ %.2f" % a["bound"]]
+                if a["bh"] is False:
+                    why.append("多指标修正（BH）")
+                a["ok"] = bool(c.get("read")) and not why
+                a["why"] = "未过" + "、".join(why) if why else ""
+    return tables
 
 
 THIN_DAY = 0.3
@@ -438,14 +606,109 @@ def experiment_view(e, base=None):
         obs = [counts.get(i, 0) for i in ids]
         chi, p = stats.srm(obs, w)
         srm = {"counts": dict(zip(ids, obs)), "conflict": counts.get("X", 0), "chi2": chi, "p": p}
-    tables = _tables(e, mm, res, ctrl, trts)
+    tables = adjust_reads(e, _tables(e, mm, res, ctrl, trts))
     # 结论提要始终按真对照组出，不随临时基准变
     c0 = [g["id"] for g in e["groups"] if g["role"] == "control"]
     t0 = [i for i in ids if i not in c0]
-    st = tables if c0 == ctrl else _tables(e, mm, res, c0, t0)
+    st = tables if c0 == ctrl else adjust_reads(e, _tables(e, mm, res, c0, t0))
     dist = (res.get("@dist") or {}).get
     return {"srm": srm, "tables": tables, "summary": summary(e, srm, st, t0), "base": ctrl[0] if ctrl else None, "trts": trts,
+            "cuped": cuped_view(e, res.get("@cuped"), tables, ctrl, trts),
+            "seg": seg_view(e, _seg_raw(res.get("@seg")), tables, ctrl, trts),
             "dist": {g: dist(g) for g in ids if dist(g)} or None, "dist_keys": dist_keys(mm, e["metric_keys"])}
+
+
+def cuped_view(e, raw, tables, ctrl, trts):
+    """CUPED 读数（全窗口累计）：{指标: {组: 调整后读数}}；判读口径同原表（p < alpha + 指标方向），另跑序贯阈值。只并列展示，不改原读数。"""
+    if not raw or not ctrl:
+        return None
+    alpha = float(C.cfg["experiment"]["alpha"])
+    pre = raw.get("@pre") or {}
+    p0, p1, why = cuped_window(e)
+    if (pre.get("p0"), pre.get("p1")) != (p0, p1):
+        return {"pre": pre, "skip": "协变量窗口规则已更新，等下次重跑后再看（%s）" % (why or "窗口有变"), "metrics": {}}
+    if pre.get("skip"):
+        return {"pre": pre, "skip": pre["skip"], "metrics": {}}
+    d1 = int(pre.get("d1") or e["last_end"])
+    n = (parse(d1) - parse(e["start"])).days + 1
+    planned = (parse(e["end"]) - parse(e["start"])).days + 1
+    out = {}
+    for t in tables:
+        if t["kind"] != "ratio":
+            continue
+        k = t["key"]
+        c0 = stats.cuped_group((raw.get(ctrl[0]) or {}).get(k) or {})
+        for g in trts:
+            x = stats.cuped_compare(c0, stats.cuped_group((raw.get(g) or {}).get(k) or {}), alpha)
+            if not x:
+                continue
+            harm = (x["diff"] > 0) == bool(t["lower_is_better"])
+            x["read"] = ("显著正向" if not harm else "显著负向") if x["p"] < alpha else None
+            x["seq"] = abs(x["z"]) >= seq_bound(n, planned, d1 >= int(e["end"]), harm)
+            out.setdefault(k, {})[g] = x
+    return {"pre": pre, "metrics": out, "d1": d1, "days": n, "stale": d1 != int(e["last_end"])} if out else None
+
+
+def _seg_raw(r):
+    """@seg 存成 {"_": {分群列: 行}, "d1": 截止日}，按 grp 列落库后在 res 里是 {"_": ..., "d1": ...}。"""
+    if not r or "_" not in r:
+        return None
+    return {"runs": r["_"], "d1": r.get("d1")}
+
+
+def seg_view(e, raw, tables, ctrl, trts):
+    """分群下钻（全窗口累计）：每个分群列 × 取值 × 指标 × 实验组出 Δ / z；同一维度内各群效应是否一致做 Cochran Q。
+    下钻只用来解释，不进结论：同一维度内各群 p 值另做 BH，未过的不标显著。"""
+    if not raw or not ctrl:
+        return None
+    cfg = C.cfg["experiment"]
+    min_n, alpha = int(cfg["seg_min_n"]), float(cfg["alpha"])
+    segs = {sg["column"]: sg for sg in cfg["segments"]}
+    labels = C.cfg.get("labels") or {}
+    sub = C.cfg.get("subscope") or {}
+    ratio = [t for t in tables if t["kind"] == "ratio" and any(r["type"] == "total" for r in t["rows"])]
+    dims_out = []
+    for col, rows in raw["runs"].items():
+        if col not in segs:                  # 配置里删掉的分群列不再展示
+            continue
+        acc = {}
+        for r in rows:
+            a = acc.setdefault((r["grp"], r["v"]), {"n": 0})
+            a["n"] += r["n"]
+            for t in ratio:
+                for f in STAT_F:
+                    kk = "%s_%s" % (f, t["key"])
+                    a[kk] = a.get(kk, 0.0) + r.get(kk, 0.0)
+        vals = sorted({v for _, v in acc}, key=lambda v: (v.startswith("@"), -sum(a["n"] for (g, vv), a in acc.items() if vv == v)))
+        if len([v for v in vals if not v.startswith("@")]) < 2:     # 只有一个取值：拆了也没东西比
+            continue
+        mets = []
+        for t in ratio:
+            lower = bool(t["lower_is_better"])
+            for g in trts:
+                cells, eff = [], []
+                for v in vals:
+                    per = {gg: dict(n=a["n"], **{f: a.get("%s_%s" % (f, t["key"]), 0.0) for f in STAT_F})
+                           for (gg, vv), a in acc.items() if vv == v and gg in (ctrl[0], g)}
+                    small = min((per.get(x) or {}).get("n", 0) for x in (ctrl[0], g)) < min_n
+                    _, vs = _row_stats(per, ctrl, [g], lower) if not small else ({}, {})
+                    c = vs.get(g)
+                    cell = {"val": v, "n": {x: (per.get(x) or {}).get("n", 0) for x in (ctrl[0], g)}, "small": small}
+                    if c:
+                        cell.update(diff=c["diff"], rel=c.get("rel"), z=c["z"], p=c["p"], read=c["read"])
+                        eff.append((c["diff"], c["se"]))
+                    cells.append(cell)
+                for c, ok in zip(cells, stats.bh_pass([c.get("p") for c in cells], alpha)):
+                    c["bh"] = ok
+                h = stats.heterogeneity(eff)
+                mets.append({"key": t["key"], "name": t["name"], "unit": t["unit"], "grp": g, "cells": cells,
+                             "het": {"q": h[0], "df": h[1], "p": h[2]} if h else None})
+        names = {sqlgen.SEG_NA: "未知", sqlgen.SEG_OTHER: "其他"}
+        vlab = (sub.get("labels") or {}) if col == sub.get("column") else {}
+        dims_out.append({"dim": col, "name": segs[col]["label"], "metrics": mets,
+                         "labels": {v: names.get(v) or vlab.get(v) or labels.get(v, v) for v in vals}})
+    d1 = int(raw.get("d1") or e["last_end"])
+    return {"dims": dims_out, "min_n": min_n, "d1": d1, "stale": d1 != int(e["last_end"])}
 
 
 def _fmt_delta(t, c):
@@ -494,7 +757,7 @@ def summary(e, srm, tables, trts):
     """结论提要：按实验节点挑累计行、固定规则出句子，不给采纳建议；逐日同向天数不作判据。"""
     cfg = C.cfg["experiment"]
     # 分布 / 进组趋势只做可视化、不进判读，不挡结论
-    if e.get("status") in ("queued", "running") or [k for k in e.get("pending") or [] if k != "@dist"]:
+    if e.get("status") in ("queued", "running") or [k for k in e.get("pending") or [] if k not in VIS_KEYS]:
         return {"state": "wait", "text": "待全窗口跑完再出结论"}
     if e.get("status") == "failed" or e.get("error"):
         return {"state": "wait", "text": "有指标跑数失败，补齐后再出结论"}
@@ -527,14 +790,20 @@ def summary(e, srm, tables, trts):
             out.append({"grp": g, "lines": lines})
             continue
         if stage == "判止损":
-            hurt = [(t, c) for t in north + guard for c in [vs(t, g)] if c and c["read"] == "显著负向"]
+            neg = [(t, c) for t in north + guard for c in [vs(t, g)] if c and c["read"] == "显著负向"]
+            # 判止损看修正后：变差侧序贯阈值（Pocock 型）+ 护栏 BH；名义显著但没过的单列一句、不提示止损
+            hurt = [(t, c) for t, c in neg if (c.get("adj") or {}).get("ok", True)]
             for t, c in hurt:
                 lines.append("%s 前 %d 天显著变差 %s（CI %s 整体在变差一侧），%s" % (
                     t["name"], sl, _fmt_delta(t, c), _fmt_ci(t, c),
                     "建议止损" if t["role"] == "north_star" else "建议先拆解（机制 / 分布 / 分母）确认是真劣化后止损"))
+            for t, c in neg:
+                if (t, c) not in hurt:
+                    lines.append("%s 前 %d 天名义显著变差 %s（z = %+.2f），%s，先观察到第 %d 天" % (
+                        t["name"], sl, _fmt_delta(t, c), c["z"], c["adj"]["why"], cfg["cadence"]["interim"]))
             if not any(vs(t, g) for t in north + guard):
                 lines.append("前 %d 天累计还没算出来，点「重跑」补齐后再判" % sl)
-            elif not hurt:
+            elif not neg:
                 cs = [(t, vs(t, g)) for t in north]
                 lines.append(("前 %d 天未见止损信号：" % sl) + "；".join(
                     "%s %s（CI %s）" % (t["name"], _fmt_delta(t, c), _fmt_ci(t, c)) for t, c in cs if c)
@@ -544,6 +813,9 @@ def summary(e, srm, tables, trts):
             continue
 
         def sig_line(t, c):
+            return _sig_line(t, c) + ("（%s）" % c["adj"]["why"] if (c.get("adj") or {}).get("why") else "")
+
+        def _sig_line(t, c):
             d = _fmt_delta(t, c)
             if abs(c["diff"]) < c["mde_abs"]:
                 return "%s %s %s（z = %+.2f），但幅度低于可测下限 %s，量级不可信" % (
@@ -561,8 +833,9 @@ def summary(e, srm, tables, trts):
         if not north:
             lines.append("未选北极星指标")
         bad = [(t, c) for t in guard for c in [vs(t, g)] if c and c["read"] == "显著负向"]
-        lines.append("；".join("%s 显著劣化 %s（z = %+.2f），需拆解后再判" % (t["name"], _fmt_delta(t, c), c["z"]) for t, c in bad)
-                     if bad else "护栏未见显著劣化")
+        lines.append("；".join("%s 显著劣化 %s（z = %+.2f）%s，需拆解后再判" % (
+            t["name"], _fmt_delta(t, c), c["z"], "（%s）" % c["adj"]["why"] if (c.get("adj") or {}).get("why") else "")
+            for t, c in bad) if bad else "护栏未见显著劣化")
         proc = [sig_line(t, c) for t in ratio if t["role"] == "process" for c in [vs(t, g)] if c and c["read"]]
         lines.append("；".join(proc) if proc else "过程指标无显著变化")
         if stage == "中期读数":

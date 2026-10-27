@@ -620,6 +620,7 @@ async function pollExp(id) {
 }
 
 let SUM_TEXT = "";
+const PEND_LABEL = { "@cum": "前 N 天累计", "@dist": "分布 / 进组趋势", "@cuped": "CUPED", "@seg": "分群下钻" };
 function renderExp(e) {
   const v = e.view, C = META.cadence, alpha = META.alpha;
   const name = id => { const g = e.groups.find(x => x.id === id); return g ? `${g.label && g.label !== g.id ? esc(g.label) + " · " : ""}${esc(g.id)}` : esc(id); };
@@ -629,7 +630,8 @@ function renderExp(e) {
   if (e.status === "failed") h += `<div class="notice crit"><b>失败</b>${esc(e.error)}</div>`;
   else if (e.error) h += `<div class="notice warn"><b>部分失败</b>${esc(e.error.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, 300))}<br>点「重跑」只补失败的部分，已出结果不动。</div>`;
   if (["queued", "running"].includes(e.status)) h += `<div class="notice info"><b>跑数中</b>先算上线前 P99，再一次扫描算全部比率指标，比率指标出来就先展示；累计行、By天、分位数排在后面补算。进度见「任务日志」。</div>`;
-  else if ((e.pending || []).length) h += `<div class="notice info"><b>补算中</b>比率指标已出，可以先看；${e.pending.map(k => esc(k.startsWith("@") ? "累计行 / By天" : metricName(k.replace(/@.*/, "")))).filter((x, i, a) => a.indexOf(x) === i).join("、")} 在后台补算，完成后自动刷新。</div>`;
+  else if ((e.pending || []).length) h += `<div class="notice info"><b>补算中</b>比率指标已出，可以先看；${e.pending.map(k => esc(PEND_LABEL[k] || metricName(k.replace(/@.*/, "")) + (k.endsWith("@day") ? "（By天）" : ""))).filter((x, i, a) => a.indexOf(x) === i).join("、")} 在后台补算，完成后自动刷新。</div>`;
+  if (e.vis_error && e.status !== "failed" && !(e.pending || []).length) h += `<div class="notice info"><b>辅助读数未算出</b>${esc(e.vis_error.slice(0, 300))}。不影响读数表和结论提要，点「重跑」只补这部分。</div>`;
   const sm = v.summary;
   if (sm) {
     const gname = id => { const g = e.groups.find(x => x.id === id); return g ? (g.label && g.label !== g.id ? `${g.label} ${g.id}` : g.id) : id; };
@@ -669,6 +671,7 @@ function renderExp(e) {
     h += `</section>`;
   }
   const TB = expTables(e, v.tables || [], base.id);
+  h += cupedHTML(e, v, base) + segHTML(e, v, base);
   if (TB.overview.rows.length) {
     h += `<div class="card-h"><h2>总览（全窗口累计）</h2><div class="controls"><button type="button" class="btn copy" data-copy="ov">复制表格</button><button type="button" class="btn copy" data-copy="allTables">复制全部表格</button></div></div>`;
     h += tableHTML(TB.overview, "otab");
@@ -684,7 +687,8 @@ function renderExp(e) {
   COPY.ov = () => ({ caption: `${e.name} · ${expScopeText(e)} · 总览（${toISO(e.start)} ~ ${toISO(e.last_end || e.end)}）`, header: TB.overview.header, rows: TB.overview.rows });
   COPY.allTables = () => ({ sections: [{ caption: `${e.name} · ${expScopeText(e)} · 总览`, header: TB.overview.header, rows: TB.overview.rows },
     ...TB.items.filter(x => x.rows.length).map(x => ({ caption: x.title, header: x.header, rows: x.rows }))] });
-  if (TB.items.length) h += `<p class="foot">判读：p &lt; ${alpha} 为显著，按指标方向标正向 / 负向；标准误按设备聚类（delta method）。Δ：百分比指标为百分点差（pp），数值指标为相对差（%）。
+  if (TB.items.length) h += `<p class="foot">判读：p &lt; ${alpha} 为显著，按指标方向标正向 / 负向；标准误按设备聚类（delta method）。
+    累计行的显著另做两层修正，结果写在判读后的括号里，原判读不变：① 多次看数（第 ${C.stop_loss} / ${C.interim} / ${C.final} 天各看一次）按成组序贯检验给每个节点单独的 |z| 阈值，收益侧早期严（O'Brien-Fleming 型），变差侧各节点接近（Pocock 型），整体误报率控制在 ${alpha}；② 同一行上北极星以外的指标 × 实验组一起做 Benjamini-Hochberg（FDR ${alpha}），北极星是事先指定的主指标不进修正。判止损提醒只认修正后仍显著的。Δ：百分比指标为百分点差（pp），数值指标为相对差（%）。
     累计行 = 设备在该时段内取并集（分子、分母不要求同一天），封顶指标用上线前 ${N} 天单设备单天 P99；逐日行单位 = 设备-天。MDE = 本窗口在 α ${alpha} / power 0.8 下可测出的最小差异。看板只给数据，采纳与否由人判断。</p>`;
   $("#expDetail").innerHTML = h;
   const draw = d => drawTrend(e, TB.items[+d.dataset.i], "tch" + d.dataset.i, base.id);
@@ -706,6 +710,8 @@ function renderExp(e) {
     if ($("#xBaseReset")) $("#xBaseReset").onclick = () => setBase(ctrl0.id);
     $$("#xTrt button").forEach(b => b.onclick = () => { TRT[e.id] = b.dataset.g; renderExp(e); });
   }
+  $$("#segDim button").forEach(b => b.onclick = () => { S.segDim = b.dataset.k; renderExp(e); });
+  $$("#segMet button").forEach(b => b.onclick = () => { S.segMet = b.dataset.k; renderExp(e); });
   const busy = ["queued", "running"].includes(e.status) || (e.pending || []).length;
   $("#editExp").disabled = !!busy; $("#editExp").title = busy ? "跑完再编辑" : "加指标 / 加 By天 只补算新增部分";
   $("#editExp").onclick = () => openNewExp(null, e);
@@ -713,6 +719,70 @@ function renderExp(e) {
   if (cs) cs.onclick = async () => { try { await navigator.clipboard.writeText(SUM_TEXT); flash(cs, "已复制", true); } catch (_) { flash(cs, "复制失败", false); } };
   $("#rerun").onclick = async () => { await api(`/api/experiments/${e.id}/rerun`, { method: "POST" }); openExp(e.id); };
   $("#delExp").onclick = async () => { if (!confirm(`删除「${e.name}」及其结果？`)) return; await api(`/api/experiments/${e.id}`, { method: "DELETE" }); CUR_EXP = null; $("#expDetail").innerHTML = ""; loadExpList(); };
+}
+
+// ─────────── CUPED：用上线前同口径取值做协变量，只并列展示，不替代原读数 ───────────
+function cupedHTML(e, v, base) {
+  const cp = v.cuped, pend = (e.pending || []).includes("@cuped");
+  if (!cp) return pend ? `<p class="muted">CUPED 方差缩减补算中…</p>` : "";
+  if (cp.skip) return `<p class="muted">CUPED 未做：${esc(cp.skip)}。</p>`;
+  const ctrl0 = e.groups.find(g => g.role === "control");
+  if (base.id !== ctrl0.id) return "";
+  const trts = e.groups.filter(g => g.role !== "control"), multi = trts.length > 1;
+  const ts = sortTables((v.tables || []).filter(t => cp.metrics[t.key]));
+  const header = ["指标"];
+  for (const g of trts) header.push(...[multi ? `Δ 原（${g.label || g.id}）` : "Δ 原", "Δ CUPED", "z 原 → CUPED", "方差降幅", "判读（CUPED）"]);
+  const rows = ts.map(t => {
+    const out = [`${t.group}：${t.name}`];
+    for (const g of trts) {
+      const c = cp.metrics[t.key][g.id];
+      if (!c) { out.push("—", "—", "—", "—", "—"); continue; }
+      const cls = c.read ? (c.read === "显著正向" ? "up" : "down") : "";
+      out.push(dFmt(t, t.unit !== "num" ? c.raw_diff : c.raw_rel), { v: dFmt(t, t.unit !== "num" ? c.diff : c.rel), cls: ("dl " + cls).trim() },
+        `${sgn(c.raw_z, 2)} → ${sgn(c.z, 2)}`, (c.var_cut * 100).toFixed(0) + "%",
+        { v: c.read ? c.read + (c.seq ? "" : "（未过多次看数阈值）") : "—", cls });
+    }
+    return out;
+  });
+  COPY.cuped = () => ({ caption: `${e.name} · ${expScopeText(e)} · CUPED 方差缩减（全窗口累计）`, header, rows });
+  const asof = cp.stale ? `（截至 ${toISO(cp.d1).slice(5)}，第 ${cp.days} 天）` : "（全窗口累计）";
+  const nd = Math.round((new Date(toISO(cp.pre.p1)) - new Date(toISO(cp.pre.p0))) / 864e5) + 1;
+  return `<section class="mtable"><div class="card-h"><h2>CUPED 方差缩减${asof}</h2><button type="button" class="btn copy" data-copy="cuped">复制表格</button></div>` +
+    tableHTML({ header, rows }, "dtab2") +
+    `<p class="foot">${cp.stale ? `CUPED 只在跨节点和冻结时重算，这里是 ${toISO(cp.d1).slice(5)} 的读数，「Δ 原」同一截止日，和上方累计行可能不一致。` : ""}协变量 = 同一设备在上线前 ${toISO(cp.pre.p0).slice(5)}~${toISO(cp.pre.p1).slice(5)}（${nd} 天${cp.pre.cut ? "；" + esc(cp.pre.cut) : ""}）的同口径取值，上线前没有行为的设备按 0 计入；调整系数 θ 两组合并估计。CUPED 不改变要估的量，只把与实验无关的个体差异扣掉；方差降多少取决于上线前后取值的相关程度，低频行为的转化率类指标通常降得少，人均类指标降得多。原读数（下方表格）仍是主口径，这里只作并列参考。</p></section>`;
+}
+
+// ─────────── 分群下钻：只用来解释效应来自哪些人，不进结论 ───────────
+function segHTML(e, v, base) {
+  const sg = v.seg, pend = (e.pending || []).includes("@seg");
+  if (!sg || !sg.dims.length) return pend ? `<p class="muted">分群下钻补算中…</p>` : "";
+  const ctrl0 = e.groups.find(g => g.role === "control");
+  if (base.id !== ctrl0.id) return "";
+  const dim = sg.dims.find(d => d.dim === S.segDim) || sg.dims[0];
+  const mets = [...new Map(dim.metrics.map(m => [m.key, m])).values()];
+  const mk = (mets.find(m => m.key === S.segMet) || mets[0] || {}).key;
+  const ms = dim.metrics.filter(m => m.key === mk), multi = ms.length > 1;
+  const gl = id => (e.groups.find(g => g.id === id) || {}).label || id;
+  const seg = (id, opts, cur) => `<div class="seg small" id="${id}">${opts.map(([k, l]) => `<button type="button" data-k="${esc(k)}" class="${k === cur ? "on" : ""}">${esc(l)}</button>`).join("")}</div>`;
+  const header = [dim.name, "设备数（对照 / 实验）"];
+  for (const m of ms) header.push(multi ? `Δ（${gl(m.grp)}）` : "Δ", "z", "判读");
+  const vals = ms.length ? ms[0].cells.map(c => c.val) : [];
+  const rows = vals.map((val, i) => {
+    const c0 = ms[0].cells[i], out = [dim.labels[val] || val, `${fmt(c0.n[ctrl0.id])} / ${ms.map(m => fmt(m.cells[i].n[m.grp])).join(" / ")}`];
+    for (const m of ms) {
+      const c = m.cells[i];
+      if (c.small || c.diff == null) { out.push(c.small ? "样本不足" : "—", "—", "—"); continue; }
+      const cls = c.read && c.bh ? (c.read === "显著正向" ? "up" : "down") : "";
+      out.push({ v: m.unit !== "num" ? sgn(c.diff * 100, 2) + "pp" : sgn((c.rel || 0) * 100, 1) + "%", cls: ("dl " + cls).trim() }, sgn(c.z, 2),
+        { v: c.read ? (c.bh ? c.read : c.read + "（修正后不显著）") : "—", cls });
+    }
+    return out;
+  });
+  const het = ms.map(m => m.het ? `${multi ? gl(m.grp) + "：" : ""}各群效应${m.het.p < 0.05 ? "<b>不一致</b>" : "无显著差异"}（Cochran Q = ${m.het.q.toFixed(1)}，df ${m.het.df}，p = ${m.het.p < 0.001 ? m.het.p.toExponential(1) : m.het.p.toFixed(3)}）` : "").filter(Boolean).join("；");
+  COPY.seg = () => ({ caption: `${e.name} · ${expScopeText(e)} · 分群下钻：${dim.name} × ${(mets.find(m => m.key === mk) || {}).name}`, header, rows });
+  return `<section class="mtable"><div class="card-h"><h2>分群下钻${sg.stale ? `（截至 ${toISO(sg.d1).slice(5)}）` : "（全窗口累计）"}</h2><div class="controls">${seg("segDim", sg.dims.map(d => [d.dim, d.name]), dim.dim)}<button type="button" class="btn copy" data-copy="seg">复制表格</button></div></div>
+    <div class="controls seg-met">${seg("segMet", mets.map(m => [m.key, m.name]), mk)}</div>` + tableHTML({ header, rows }, "dtab2") +
+    `<p class="foot">${sg.stale ? `分群只在跨节点和冻结时重算，这里是 ${toISO(sg.d1).slice(5)} 的读数。` : ""}${het ? het + "。" : ""}设备按窗口内认组事件上的列值分群（配置 experiment.segments），每列只单列设备最多的前几个取值，其余并成「其他」。分群取值是实验期行为，可能被实验本身改变，只用来解释效应来自哪些人，不进结论；同一维度内各群一起做 BH 修正，单组设备不足 ${fmt(sg.min_n)} 台的群不出读数。</p></section>`;
 }
 
 // ─────────── 实验读数表：纵向 逐日 → 前 N 天累计 → 累计；横向 对照 | 实验 | Δ | z | 判读 ───────────
@@ -732,8 +802,9 @@ function expTables(e, tables, baseId) {
     return t.unit !== "num" ? sgn(c.diff * 100, 2) + "pp" : sgn(c.rel * 100, 1) + "%";
   };
   const cls = c => c && c.read ? (c.read === "显著正向" ? "up" : "down") : "";
+  const adjT = c => c.adj && c.adj.ok === false ? "（修正后不显著）" : c.adj && c.adj.ok ? "（修正后仍显著）" : "";
   const read = r => { const xs = trts.filter(g => r.vs[g.id] && r.vs[g.id].read);
-    return { v: xs.length ? xs.map(g => (multi ? lab(g) + " " : "") + r.vs[g.id].read).join("；") : "—", cls: xs.length === 1 ? cls(r.vs[xs[0].id]) : "" }; };
+    return { v: xs.length ? xs.map(g => (multi ? lab(g) + " " : "") + r.vs[g.id].read + adjT(r.vs[g.id])).join("；") : "—", cls: xs.length === 1 ? cls(r.vs[xs[0].id]) : "" }; };
   const items = tables.map(t => {
     const header = ["日期", `${cname} ${lab(ctrl)}`];
     for (const g of trts) header.push(`实验 ${lab(g)}`, multi ? `Δ（${g.label || g.id}）` : "Δ", "z");
@@ -818,7 +889,8 @@ function expCards(ts, base, trt) {
     // 小条刻度：覆盖区间与 ±MDE，0 居中
     const span = Math.max(Math.abs(lo), Math.abs(hi), mde || 0) * 1.15 || 1e-9, X = u => 50 + u / span * 50;
     const tag = !c.read ? `<span class="tag">不显著</span>` : `<span class="tag ${cls}">${esc(c.read)}</span>` +
-      (Math.abs(c.diff) < c.mde_abs ? `<span class="tag">低于可测下限</span>` : "");
+      (Math.abs(c.diff) < c.mde_abs ? `<span class="tag">低于可测下限</span>` : "") +
+      (c.adj && c.adj.ok === false ? `<span class="tag" title="${esc(c.adj.why)}">修正后不显著</span>` : c.adj && c.adj.ok ? `<span class="tag ${cls}">修正后仍显著</span>` : "");
     const lbl = t.lower_is_better ? "越低越好" : "";
     return `<div class="xcard${t.group === "北极星" ? " hero" : ""}" data-tip="${esc(`${t.name}：${gLab(trt)} ${v(gt)} vs ${gLab(base)} ${v(gb)}；Δ ${dFmt(t, est)}，95% CI [${dFmt(t, lo)}, ${dFmt(t, hi)}]，可测下限 ±${dFmt(t, mde).replace(/^[+-]/, "")}；z = ${sgn(c.z, 2)}`)}">
       <div class="k">${t.group === "北极星" ? "北极星 · " : ""}${esc(t.name)}${lbl ? ` <small class="muted">${lbl}</small>` : ""}</div>

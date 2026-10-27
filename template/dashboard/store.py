@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS metrics (
 CREATE TABLE IF NOT EXISTS experiments (
   id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, scope TEXT, groups TEXT,
   start INTEGER, end INTEGER, launch INTEGER, metric_keys TEXT, daily_keys TEXT, subs TEXT, caps TEXT, status TEXT,
-  pending TEXT, last_end INTEGER, error TEXT, created_at REAL, updated_at REAL);
+  pending TEXT, last_end INTEGER, error TEXT, created_at REAL, updated_at REAL, vis_error TEXT);
 CREATE TABLE IF NOT EXISTS exp_results (
   exp_id INTEGER, metric_key TEXT, grp TEXT, payload TEXT, run_end INTEGER, run_at REAL,
   PRIMARY KEY (exp_id, metric_key, grp));
@@ -50,6 +50,9 @@ def init():
     from .sqlgen import validate_metric
     with conn() as c:
         c.executescript(SCHEMA)
+        # 旧库升级：辅助读数（分布 / CUPED / 分群）失败单独记，不挡结论提要
+        if "vis_error" not in [r["name"] for r in c.execute("PRAGMA table_info(experiments)")]:
+            c.execute("ALTER TABLE experiments ADD COLUMN vis_error TEXT")
         now = time.time()
         for key, d in presets():
             validate_metric(d)

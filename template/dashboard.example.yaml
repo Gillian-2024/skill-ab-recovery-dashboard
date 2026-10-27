@@ -106,6 +106,13 @@ experiment:
   alpha: 0.05
   srm_p: 0.001
   cap_pre_days: 7                             # P99 封顶取上线日之前几天
+  cuped_pre_days: 28                          # CUPED 协变量取上线前几天的同口径取值（0 = 不做）
+  cuped_min_days: 7                           # 协变量窗口被同组号的上一个实验截短后不足几天就不做
+  segments:                                   # 分群下钻：按设备在窗口内的列值分群（只作解释，不进结论）
+    - { column: region, label: 地区 }
+    - { column: entry, label: 入口 }
+    - { column: platform, label: 平台, top: 5 }   # top：只单列设备最多的前几个取值，其余并成「其他」（默认 12）
+  seg_min_n: 300                              # 分群每组至少几台设备才出读数
 
 # 预置指标（页面上还能自定义更多）
 metrics:

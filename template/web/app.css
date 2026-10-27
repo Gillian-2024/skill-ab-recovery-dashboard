@@ -408,3 +408,4 @@ details.trend summary { cursor: pointer; font-size: 12px; color: var(--ink-2); }
 #metricList td.name small { display: block; white-space: normal; max-width: 28em; }
 .pill.warn { background: var(--warn-bg); color: var(--ink-2); }
 .chart-note { margin: 6px 0 0; }
+.seg-met { margin: 0 0 8px; }

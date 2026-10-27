@@ -98,6 +98,149 @@ def _gammq(a, x):
     return math.exp(-x + a * math.log(x) - gln) * h
 
 
+def phi(z):
+    return 0.5 * math.erfc(-z / math.sqrt(2))
+
+
+def _dens(z):
+    return math.exp(-z * z / 2) / math.sqrt(2 * math.pi)
+
+
+def z_of_two_sided(a):
+    """双侧显著水平 a 对应的 |z| 阈值（二分，精度 1e-10）。"""
+    lo, hi = 0.0, 40.0
+    for _ in range(100):
+        mid = (lo + hi) / 2
+        if 2 * (1 - phi(mid)) > a:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2
+
+
+# α 消耗函数（Lan-DeMets）：t = 信息比例（0~1]，返回到 t 为止累计可花掉的双侧 α
+SPEND = {
+    "obf": lambda t, a: 2 - 2 * phi(z_of_two_sided(a) / math.sqrt(t)),       # O'Brien-Fleming 型：早期很严
+    "pocock": lambda t, a: a * math.log(1 + (math.e - 1) * t),               # Pocock 型：各次阈值接近
+}
+_GRID = 401
+
+
+def gs_bounds(fracs, alpha=0.05, spend="obf"):
+    """成组序贯检验的双侧 |z| 阈值：fracs = 各次看数的信息比例（升序，最后一次通常 = 1）。
+    第 k 次在前 k−1 次都没越线的条件下越线的概率 = 消耗函数在 t_k 与 t_{k−1} 处之差；
+    Z_k 由 Z_{k−1} 加独立增量得到（Cov = √(t_j/t_k)），继续区间内的密度用网格数值积分递推。"""
+    f = SPEND[spend]
+    out, prev_t, prev_a, grid, dens = [], 0.0, 0.0, None, None
+    for t in fracs:
+        t = min(max(float(t), 1e-6), 1.0)
+        if t <= prev_t:                                       # 同一信息量重复看：沿用上一次阈值
+            out.append(out[-1] if out else z_of_two_sided(alpha))
+            continue
+        a_k = f(t, alpha) - prev_a
+        if grid is None:
+            c = z_of_two_sided(max(a_k, 1e-15))
+        else:
+            dt_ = t - prev_t
+            s = math.sqrt(dt_ / t)
+            h = grid[1] - grid[0]
+            w = [d * h * (0.5 if i in (0, len(grid) - 1) else 1) for i, d in enumerate(dens)]
+            mu = [u * math.sqrt(prev_t / t) for u in grid]
+
+            def cross(c):
+                return sum(wi * (1 - phi((c - m) / s) + phi((-c - m) / s)) for wi, m in zip(w, mu))
+            lo, hi = 0.0, 40.0
+            for _ in range(80):
+                mid = (lo + hi) / 2
+                if cross(mid) > a_k:
+                    lo = mid
+                else:
+                    hi = mid
+            c = (lo + hi) / 2
+        out.append(c)
+        # 继续区间（|Z_k| < c）上的密度
+        new = [-c + 2 * c * i / (_GRID - 1) for i in range(_GRID)]
+        if grid is None:
+            nd = [_dens(z) for z in new]
+        else:
+            nd = [sum(wi * _dens((z - m) / s) / s for wi, m in zip(w, mu)) for z in new]
+        grid, dens, prev_t, prev_a = new, nd, t, f(t, alpha)
+    return out
+
+
+def bh_pass(ps, level):
+    """Benjamini-Hochberg：ps = p 值列表（None 不参与），返回同序的是否通过（FDR 控制在 level）。"""
+    idx = sorted((p, i) for i, p in enumerate(ps) if p is not None)
+    m, k = len(idx), 0
+    for r, (p, _) in enumerate(idx, 1):
+        if p <= r / m * level:
+            k = r
+    ok = {i for _, i in idx[:k]}
+    return [i in ok for i in range(len(ps))]
+
+
+def _ratio_grad_cov(n, s, u, v, w, z):
+    """两个比率 U = Σu/Σv、W = Σw/Σz（同一批设备）的 delta method 协方差 Cov(U, W)。s = 充分统计量取值函数。"""
+    mu, mv, mw, mz = s(u) / n, s(v) / n, s(w) / n, s(z) / n
+    if not mv or not mz:
+        return None
+    c = lambda a, b: s(a, b) / n - (s(a) / n) * (s(b) / n)
+    gu, gv, gw, gz = 1 / mv, -mu / mv ** 2, 1 / mz, -mw / mz ** 2
+    return (gu * gw * c(u, w) + gu * gz * c(u, z) + gv * gw * c(v, w) + gv * gz * c(v, z)) / n
+
+
+def cuped_group(st):
+    """单组 CUPED 原料：st = n + Σ / Σ两两乘积（x, y = 实验期分子 / 分母；a, b = 上线前同口径分子 / 分母）。
+    返回 (Y, X, Var Y, Var X, Cov(Y, X))；上线前分母全为 0 → None。"""
+    n = st.get("n")
+    if not n or not st.get("sy") or not st.get("sb"):
+        return None
+
+    def s(a, b=None):
+        if b is None:
+            return st["s" + a]
+        return st.get("s" + a + b, st.get("s" + b + a))
+    Y, X = st["sx"] / st["sy"], st["sa"] / st["sb"]
+    return (Y, X, max(_ratio_grad_cov(n, s, "x", "y", "x", "y"), 0.0), max(_ratio_grad_cov(n, s, "a", "b", "a", "b"), 0.0),
+            _ratio_grad_cov(n, s, "x", "y", "a", "b"))
+
+
+def cuped_compare(c, t, alpha=0.05, power=0.8):
+    """c / t = cuped_group 结果。θ 两组合并估计；返回调整后的差、se、z 与方差降幅；与 compare 同口径（绝对差）。"""
+    if not c or not t:
+        return None
+    vx = c[3] + t[3]
+    v0 = c[2] + t[2]
+    if vx <= 0 or v0 <= 0:
+        return None
+    cov = c[4] + t[4]
+    theta = cov / vx
+    d = (t[0] - c[0]) - theta * (t[1] - c[1])
+    var = max(v0 - cov * cov / vx, 1e-300)
+    se = math.sqrt(var)
+    za, zb = _z(1 - alpha / 2), _z(power)
+    out = {"diff": d, "se": se, "z": d / se, "p": _p_two_sided(d / se), "theta": theta,
+           "ci_low": d - za * se, "ci_high": d + za * se, "var_cut": 1 - var / v0, "mde_abs": (za + zb) * se}
+    raw_d, raw_se = t[0] - c[0], math.sqrt(v0)
+    out.update(raw_diff=raw_d, raw_se=raw_se, raw_z=raw_d / raw_se)
+    if c[0]:
+        out["rel"] = d / c[0]
+        out["raw_rel"] = raw_d / c[0]
+    return out
+
+
+def heterogeneity(effects):
+    """Cochran Q：effects = [(Δ, se)]，检验各分群效应是否一致。返回 (Q, df, p)；不足 2 群 → None。"""
+    xs = [(d, 1 / se ** 2) for d, se in effects if se and se > 0]
+    if len(xs) < 2:
+        return None
+    sw = sum(w for _, w in xs)
+    mean = sum(d * w for d, w in xs) / sw
+    q = sum(w * (d - mean) ** 2 for d, w in xs)
+    df = len(xs) - 1
+    return q, df, _gammq(df / 2.0, q / 2.0)
+
+
 def srm(counts, weights=None):
     """各组设备数的卡方检验（默认等比分流）。返回 (chi2, p)。"""
     k = len(counts)

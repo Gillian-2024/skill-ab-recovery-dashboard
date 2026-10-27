@@ -118,6 +118,10 @@ subscope:                     # 可选：范围下按某列细分（国家 / 渠
 | `alpha` | 0.05 | 显著性水平；MDE 按 power 0.8 |
 | `srm_p` | 0.001 | 分流检查卡方 p 低于它判 SRM |
 | `cap_pre_days` | 7 | P99 封顶取上线日前几天 |
+| `cuped_pre_days` | 28 | CUPED 协变量取上线日前几天的同口径取值；`0` = 不做 CUPED |
+| `cuped_min_days` | 7 | 协变量窗口里同一批组号跑过别的实验时，窗口从那个实验结束次日起；剩下不足几天就不做 |
+| `segments` | `[]` | 分群下钻：`[{column, label, top}]`，`column` 要在 `table.columns.string` 里；`top` = 只单列设备最多的前几个取值（默认 12，其余并成「其他」） |
+| `seg_min_n` | 300 | 分群每组至少几台设备才出读数 |
 
 组号只允许字母数字和 `_ . : -`，最长 64。
 

@@ -315,8 +315,12 @@ def exp_rerun(eid):
         miss_m = [k for k in e["metric_keys"] if k in mm and k not in have]
         miss_d = [k for k in e.get("daily_keys") or [] if k + "@day" not in have]
         miss_c = [k for k in ratio for c, _ in jobs.cum_cutoffs(int(e["start"]), int(e["last_end"])) if "%s@c%d" % (k, c) not in have]
-        if miss_m or miss_d or miss_c or (ratio and "@dist" not in have):
+        vis = [k for k in jobs.VIS_KEYS if k != "@seg" or C.cfg["experiment"]["segments"]]
+        if miss_m or miss_d or miss_c or (ratio and (any(k not in have for k in vis) or e.get("vis_error") or jobs._cuped_window_changed(e))):
             return jsonify(mode="incremental", job_id=jobs.submit("experiment", {"exp_id": eid, "only": miss_m, "only_daily": miss_d}))
+        # 已冻结且结果齐全：不重扫整个窗口（结果也不会变），只重算辅助读数
+        if e["status"] == "frozen" and ratio:
+            return jsonify(mode="incremental", job_id=jobs.submit("experiment", {"exp_id": eid, "only": [], "only_daily": [], "refresh_vis": True}))
     return jsonify(mode="full", job_id=jobs.submit("experiment", {"exp_id": eid}))
 
 

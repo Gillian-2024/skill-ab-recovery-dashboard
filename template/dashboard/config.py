@@ -143,6 +143,20 @@ def validate(c):
     e.setdefault("cap_pre_days", 7)
     e.setdefault("identify_events", [])
     e.setdefault("extra_events", [])
+    e.setdefault("cuped_pre_days", 28)          # CUPED 协变量 = 上线前几天的同口径取值；0 = 不做 CUPED
+    e.setdefault("cuped_min_days", 7)           # 协变量窗口被同组号的上一个实验截短后不足几天就不做
+    e.setdefault("seg_min_n", 300)              # 分群每组至少几台设备才出读数
+    _need(int(e["cuped_pre_days"]) >= 0 and int(e["cuped_min_days"]) >= 1 and int(e["seg_min_n"]) >= 1,
+          "experiment.cuped_pre_days ≥ 0、cuped_min_days ≥ 1、seg_min_n ≥ 1")
+    segs = e.setdefault("segments", [])
+    _need(isinstance(segs, list), "experiment.segments 要写成列表：[{column, label, top}]")
+    for sg in segs:
+        _need(isinstance(sg, dict) and sg.get("column") in c["table"]["columns"]["string"],
+              "experiment.segments 的 column 要是 table.columns.string 里的列：%r" % sg)
+        sg.setdefault("label", sg["column"])
+        sg.setdefault("top", 12)
+        _need(isinstance(sg["top"], int) and 1 <= sg["top"] <= 50, "experiment.segments 的 top 要是 1~50 的整数")
+    _need(len({sg["column"] for sg in segs}) == len(segs), "experiment.segments 的 column 不能重复")
     for ev in e["identify_events"] + e["extra_events"]:
         _need(_EVENT.match(str(ev)), "experiment 事件名不合法：%r" % ev)
     c["metrics"] = list(c.get("metrics") or [])
