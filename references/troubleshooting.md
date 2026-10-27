@@ -24,3 +24,4 @@
 | 启动报「dashboard.yaml：…」 | 配置不合法 | 按提示改，再跑 `python3 tools/check_config.py` |
 | 改了预置指标但页面没变 | 页面上编辑过的预置指标不再被 yaml 覆盖 | 指标库里点「恢复预置」 |
 | 服务停了 / 电脑重启后没起来 | 看板是普通进程 | `python3 tools/install_service.py` 生成 launchd / systemd 配置，按输出提示安装 |
+| 结果库损坏 / 误删实验想找回 | | 停服务，`gunzip -c data/snapshots/dashboard-<日期>.db.gz > data/dashboard.db` 换回某天的快照，再启动（快照每天一份，留 `maintenance.snapshot_keep` 份） |

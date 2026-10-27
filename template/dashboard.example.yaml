@@ -13,6 +13,11 @@ schedule:
   retry_gap_hours: 2       # 昨天数据不完整时，隔几小时重试
   retry_until_hour: 20     # 重试到几点为止
 
+maintenance:
+  snapshot_keep: 14        # 结果库每天一份快照（data/snapshots/），留几份
+  log_max_mb: 5            # data/server.log 超过多少 MB 轮转（作为系统服务跑时）
+  log_keep: 3              # 轮转后留几份
+
 # 取数通道：duckdb（本地文件）/ sqlalchemy（数据库 URL，连接串放 .env）/ command（自定义命令）
 source:
   type: duckdb

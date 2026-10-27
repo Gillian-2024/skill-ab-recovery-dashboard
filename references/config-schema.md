@@ -24,6 +24,18 @@
 | `retry_gap_hours` | 2 | 昨天不完整时隔几小时重试 |
 | `retry_until_hour` | 20 | 重试到几点为止 |
 
+## maintenance
+
+每天第一次定时检查（含启动后第一次）做一次，只写数据目录、不出本机。
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `snapshot_keep` | 14 | 结果库快照 `<data_dir>/snapshots/dashboard-YYYYMMDD.db.gz` 留几份（SQLite 在线备份 + 完整性校验 + gzip）。恢复：停服务 → `gunzip -c <快照> > <data_dir>/dashboard.db` → 启动 |
+| `log_max_mb` | 5 | `<data_dir>/server.log` 超过多少 MB 轮转；只在作为系统服务跑（日志重定向到这个文件）时生效 |
+| `log_keep` | 3 | 轮转后留几份 `server.log.N.gz` |
+
+快照和结果库在同一块盘上，防硬盘损坏还要另做整机备份。
+
 ## source
 
 | 字段 | 说明 |

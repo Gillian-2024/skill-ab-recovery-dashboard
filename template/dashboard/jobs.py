@@ -926,10 +926,17 @@ def run_job(j):
 
 def daily_tick():
     """每分钟检查：到点刷新漏斗（近 N 天里缺的 / 不完整的 + 昨天），续跑未冻结实验；昨日不完整则隔几小时重试。"""
+    from . import maint
     sch = C.cfg["schedule"]
-    last_day, last_retry = None, 0
+    last_day, last_retry, last_maint = None, 0, None
     while True:
         now = dt.datetime.now()
+        if last_maint != now.date():      # 每天第一次 tick（含启动后第一次）：结果库快照 + 日志轮转；失败当天不再重试
+            last_maint = now.date()
+            try:
+                maint.daily(now.date())
+            except Exception:             # 维护出错不能挡调度
+                traceback.print_exc()
         due = (now.hour, now.minute) >= C.daily_at()
         if due and last_day != now.date():
             schedule_daily(force=True)

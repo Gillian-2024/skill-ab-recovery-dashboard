@@ -43,6 +43,12 @@ def validate(c):
     sch.setdefault("retry_gap_hours", 2)
     sch.setdefault("retry_until_hour", 20)
     _need(re.match(r"^\d{1,2}:\d{2}$", str(sch["daily_at"])), "schedule.daily_at 写成 HH:MM")
+    mt = c.setdefault("maintenance", {})
+    mt.setdefault("snapshot_keep", 14)
+    mt.setdefault("log_max_mb", 5)
+    mt.setdefault("log_keep", 3)
+    for k in ("snapshot_keep", "log_max_mb", "log_keep"):
+        _need(isinstance(mt[k], int) and not isinstance(mt[k], bool) and 1 <= mt[k] <= 365, "maintenance.%s 要写 1~365 的整数" % k)
 
     s = c.get("source") or {}
     _need(s.get("type") in SOURCES, "source.type 只能是 %s" % " / ".join(SOURCES))
