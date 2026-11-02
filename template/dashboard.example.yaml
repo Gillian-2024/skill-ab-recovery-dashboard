@@ -25,6 +25,7 @@ source:
   path: data/demo.duckdb
   max_rows: 5000           # 单条查询返回行数上限，到达即报错（防截断）
   timeout_s: 600
+  # healthcheck: db.example.com:443   # 远程数据源可配：日更前查连通，连不上不提交、恢复后自动补
 
 # 事件明细表：一行一个事件
 table:

@@ -8,6 +8,7 @@ trace(q) 每条查询回调一次：{label, sql, rows, seconds, error, task_id}�
 """
 import json
 import os
+import socket
 import subprocess
 import threading
 import time
@@ -254,8 +255,31 @@ class CommandSource(_Base):
         return rows, task_id
 
 
+NET_HINT = "多半是 VPN 没连或网络 / DNS 断了；看板已暂停提交跑数，恢复后 1 分钟内自动补跑，不用手动重跑"
+
+
+def reachable(timeout=5):
+    """配了 source.healthcheck（host:port）时查 DNS 解析 + TCP 握手：能连回 ""，否则回原因；没配直接回 ""。"""
+    hc = C.cfg["source"].get("healthcheck")
+    if not hc:
+        return ""
+    host, _, port = str(hc).rpartition(":")
+    try:
+        socket.getaddrinfo(host, int(port), type=socket.SOCK_STREAM)
+    except OSError as e:
+        return "DNS 解析不了 %s（%s）" % (host, e)
+    try:
+        socket.create_connection((host, int(port)), timeout=timeout).close()
+    except OSError as e:
+        return "连不上 %s（%s）" % (hc, e)
+    return ""
+
+
 def open_source(log=print, trace=None):
     t = C.cfg["source"]["type"]
+    why = reachable()
+    if why:
+        raise SourceError("数据源连不上：%s。%s" % (why, NET_HINT))
     return {"duckdb": DuckDBSource, "sqlalchemy": SQLAlchemySource, "command": CommandSource}[t](log, trace)
 
 

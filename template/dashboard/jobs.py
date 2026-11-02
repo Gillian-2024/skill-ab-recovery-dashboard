@@ -1,6 +1,7 @@
 """后台任务：漏斗刷新、实验回收。单线程串行执行（数仓并发不可控，串行最稳）。"""
 import datetime as dt
 import functools
+import sys
 import threading
 import time
 import traceback
@@ -927,8 +928,7 @@ def run_job(j):
 def daily_tick():
     """每分钟检查：到点刷新漏斗（近 N 天里缺的 / 不完整的 + 昨天），续跑未冻结实验；昨日不完整则隔几小时重试。"""
     from . import maint
-    sch = C.cfg["schedule"]
-    last_day, last_retry, last_maint = None, 0, None
+    st, last_maint = {"run_day": None, "retry": 0, "net_wait": False}, None
     while True:
         now = dt.datetime.now()
         if last_maint != now.date():      # 每天第一次 tick（含启动后第一次）：结果库快照 + 日志轮转；失败当天不再重试
@@ -937,14 +937,41 @@ def daily_tick():
                 maint.daily(now.date())
             except Exception:             # 维护出错不能挡调度
                 traceback.print_exc()
-        due = (now.hour, now.minute) >= C.daily_at()
-        if due and last_day != now.date():
-            schedule_daily(force=True)
-            last_day, last_retry = now.date(), time.time()
-        elif due and now.hour < sch["retry_until_hour"] and time.time() - last_retry > sch["retry_gap_hours"] * 3600:
-            if schedule_daily(force=False):
-                last_retry = time.time()
+        try:
+            daily_step(now, st)
+        except Exception:                 # 调度异常不能让日更线程退出（否则直到重启都不再刷新）
+            traceback.print_exc()
         time.sleep(60)
+
+
+# 数据源连不上的原因（"" = 能连或没配 source.healthcheck）：日更提交前查一次；页面顶部提醒读它
+NET_DOWN = ""
+
+
+def daily_step(now, st):
+    """日更线程每分钟一次：到点整批提交（force），之后每 retry_gap_hours 小时补缺到 retry_until_hour。
+    配了 source.healthcheck 时提交前先查连通：连不上不提交、不记这次（下一分钟再查），恢复后立刻补上，过了重试截止时刻也补。"""
+    global NET_DOWN
+    sch = C.cfg["schedule"]
+    due = (now.hour, now.minute) >= C.daily_at()
+    force = due and st["run_day"] != now.date()
+    retry = due and not force and (st["net_wait"] or (now.hour < sch["retry_until_hour"]
+                                                      and time.time() - st["retry"] > sch["retry_gap_hours"] * 3600))
+    if not (force or retry):
+        return
+    why = sources.reachable()
+    if why != NET_DOWN:
+        print("[daily] %s %s" % (now.strftime("%H:%M"), "数据源连不上，暂停提交跑数：" + why if why else "数据源已可连，继续日更"),
+              file=sys.stderr, flush=True)
+        NET_DOWN = why
+    st["net_wait"] = bool(why)
+    if why:
+        return
+    if force:
+        schedule_daily(force=True)
+        st["run_day"], st["retry"] = now.date(), time.time()
+    elif schedule_daily(force=False):
+        st["retry"] = time.time()
 
 
 def schedule_daily(force):

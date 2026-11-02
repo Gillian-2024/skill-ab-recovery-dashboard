@@ -379,7 +379,13 @@ ROLES = ("north_star", "process", "guardrail")
 
 
 def validate_metric(d):
+    if not isinstance(d, dict):
+        raise MetricError("指标定义要是 JSON 对象")
     kind = d.get("kind", "ratio")
+    need = {"ratio": ("numerator", "denominator"), "quantile": ("source",)}.get(kind, ())
+    miss = [k for k in need if not isinstance(d.get(k), dict)]
+    if miss:
+        raise MetricError("缺少 %s" % " / ".join(miss))
     if not str(d.get("name", "")).strip():
         raise MetricError("指标名不能为空")
     if d.get("role", "process") not in ROLES:

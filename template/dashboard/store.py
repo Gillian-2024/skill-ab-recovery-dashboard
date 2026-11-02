@@ -235,7 +235,9 @@ def enqueue(kind, params):
 
 def next_job():
     with conn() as c:
-        r = c.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY id LIMIT 1").fetchone()
+        # 实验跑数 / 补算优先，漏斗排在后面；同一档按提交顺序
+        r = c.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY "
+                      "CASE WHEN kind IN ('experiment', 'exp_followup') THEN 0 ELSE 1 END, id LIMIT 1").fetchone()
         if not r:
             return None
         # 只接还在排队的：选中到改状态之间可能被取消

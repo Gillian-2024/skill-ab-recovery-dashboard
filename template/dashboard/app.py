@@ -178,6 +178,11 @@ def metric_update(key):
 
 @app.delete("/api/metrics/<key>")
 def metric_delete(key):
+    m = store.metric_map().get(key)
+    if not m:
+        return jsonify(error="指标不存在"), 404
+    if m["preset"]:
+        raise ValueError("预置指标不能删除，可在指标库里「恢复预置」")
     store.delete_metric(key)
     return jsonify(ok=True)
 
@@ -215,8 +220,9 @@ def health():
         if j["status"] == "failed" and not resolved(j) and json.loads(j["params"] or "{}").get("exp_id") not in bad_ids:
             fails.append({"id": j["id"], "kind": j["kind"], "error": (j["error"] or "")[:200], "at": j["finished_at"]})
     login = any(any(h in (f["error"] or "").lower() for h in sources._AUTH_HINTS) for f in fails + bad)
+    # net_down：日更上一次提交前查到数据源连不上的原因（配了 source.healthcheck 才有；每分钟复查，恢复即清空）
     return jsonify(auth_ok=sources.auth_ok(), login_suspect=login, fails=fails, failed_exps=bad,
-                   auth_hint=C.cfg["source"].get("auth_hint", ""))
+                   auth_hint=C.cfg["source"].get("auth_hint", ""), net_down=jobs.NET_DOWN)
 
 
 def _parse_exp(b):

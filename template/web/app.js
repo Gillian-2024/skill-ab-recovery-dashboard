@@ -1262,6 +1262,8 @@ async function loadHealth() {
   let h;
   try { h = await api("/api/health"); } catch (_) { return; }
   let out = "";
+  if (h.net_down)
+    out += `<div class="notice crit"><b>${SRC_NAME[META.source_type] || "数据源"}连不上</b>${esc(h.net_down)}。多半是 VPN 没连或网络 / DNS 断了；看板已暂停提交跑数，恢复后 1 分钟内自动补跑，不用手动重跑。</div>`;
   if (!h.auth_ok || h.login_suspect)
     out += `<div class="notice crit"><b>${SRC_NAME[META.source_type] || "数据源"}${h.auth_ok ? "凭据可能已失效" : "凭据未配置"}</b>取数会失败。${esc(h.auth_hint || "按 README「配置数据源」检查 .env / 登录态后重启看板")}，再到「任务日志」重跑失败的任务。</div>`;
   const fe = h.failed_exps || [];

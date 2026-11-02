@@ -56,6 +56,8 @@ def validate(c):
     _need(s["dialect"] in DIALECTS, "source.dialect 只能是 %s" % " / ".join(DIALECTS))
     s.setdefault("max_rows", 5000)
     s.setdefault("timeout_s", 900)
+    _need(not s.get("healthcheck") or re.match(r"^[A-Za-z0-9.-]+:\d{1,5}$", str(s["healthcheck"])),
+          "source.healthcheck 写成 主机:端口（如 db.example.com:443）")
     c["source"] = s
 
     t = c.get("table") or {}
