@@ -79,7 +79,7 @@ def main():
                     ev("play_start", entry, dur=int(rnd.lognormvariate(6.2, 0.5)), tag=tag)
                     idur = rnd.choice([15000, 30000, 60000, 120000])
                     watched = int(min(idur, rnd.expovariate(1 / (idur * 0.55))))
-                    ev("play_end", entry, dur=watched, idur=idur, valid=watched > 3000, tag=tag)
+                    ev("play_end", entry, dur=watched, idur=idur, valid=watched >= 3000, tag=tag)
     if os.path.exists(a.out):
         os.remove(a.out)
     # 逐行 INSERT 很慢：先写临时 CSV，再整表导入

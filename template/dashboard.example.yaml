@@ -76,7 +76,7 @@ funnel:
     - { key: imp,     label: 卡片曝光,   event: item_impression, segment: 结果页 }
     - { key: click,   label: 卡片点击,   event: item_click,      segment: 结果页 }
     - { key: play,    label: 开始播放,   event: play_start,      segment: 消费 }
-    - { key: play3s,  label: 有效播放,   event: play_end,        segment: 消费, where: "is_valid OR duration_ms > 3000" }
+    - { key: play3s,  label: 有效播放,   event: play_end,        segment: 消费, where: "is_valid OR duration_ms >= 3000" }
   extra_steps:                                # 只做独立去重计数、不进包含式链路的事件
     - { key: noresult, label: 无结果, event: no_result }
   core: [query, result, click, play]          # 核心链路：表格加粗、条形图深色
@@ -134,7 +134,7 @@ metrics:
     name: 点击 → 有效播放 UV 转化
     role: process
     kind: ratio
-    numerator:   { event: play_end, agg: uv, filters: [["any", [["is_valid", "=", "true"], ["duration_ms", ">", "3000"]]]] }
+    numerator:   { event: play_end, agg: uv, filters: [["any", [["is_valid", "=", "true"], ["duration_ms", ">=", "3000"]]]] }
     denominator: { event: item_click, agg: uv }
     numerator_within_denominator: true
   - key: plays_per_user
