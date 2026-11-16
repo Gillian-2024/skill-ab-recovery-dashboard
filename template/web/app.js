@@ -823,6 +823,7 @@ function expTables(e, tables, baseId) {
   });
   // 总览：每个指标取「累计」行 + MDE；按 北极星 → 过程 → 护栏 排
   const order = { north_star: 0, process: 1, guardrail: 2 };
+  const nStar = tables.filter(t => t.group === "北极星").length, pk = (tables.find(t => t.group === "北极星") || {}).key;
   const oh = ["指标", `${cname} ${lab(ctrl)}`];
   for (const g of trts) oh.push(`实验 ${lab(g)}`, multi ? `Δ（${g.label || g.id}）` : "Δ", "z", "MDE");
   oh.push("判读");
@@ -830,7 +831,7 @@ function expTables(e, tables, baseId) {
   for (const t of [...tables].sort((a, b) => order[a.role] - order[b.role])) {
     const r = t.rows.find(x => x.type === "total");
     if (!r) continue;
-    const out = [`${t.group}：${t.name}`, val(t, r.groups[ctrl.id])];
+    const out = [`${t.group}：${t.name}${nStar > 1 && t.key === pk ? "（本实验主指标）" : ""}`, val(t, r.groups[ctrl.id])];
     for (const g of trts) {
       const c = r.vs[g.id];
       out.push(val(t, r.groups[g.id]), { v: delta(t, c, r.groups[ctrl.id], r.groups[g.id]), cls: cls(c) },
@@ -881,6 +882,8 @@ const dOf = (t, c) => c ? (t.unit !== "num" ? [c.diff, c.ci_low, c.ci_high, c.md
 const sigCls = c => c && c.read ? (c.read === "显著正向" ? "up" : "down") : "";
 
 function expCards(ts, base, trt) {
+  // 多个「北极星」组指标时，标出实验自己的主指标（metric_keys 里第一个北极星）
+  const nStar = ts.filter(t => t.group === "北极星").length, pk = (ts.find(t => t.group === "北极星") || {}).key;
   return ts.map(t => {
     const r = totalRow(t), c = r.vs[trt.id], d = dOf(t, c), gb = r.groups[base.id], gt = r.groups[trt.id];
     const v = x => x && x.value != null ? (t.unit !== "num" ? pct(x.value) : x.value.toFixed(2)) : "—";
@@ -899,7 +902,7 @@ function expCards(ts, base, trt) {
         <span class="mde" style="left:${X(-mde)}%;width:${X(mde) - X(-mde)}%"></span><span class="z0"></span>
         <span class="rng ${cls}" style="left:${X(lo)}%;width:${Math.max(X(hi) - X(lo), 0.8)}%"></span><span class="pt ${cls}" style="left:${X(est)}%"></span></div>
       <div class="s">[${dFmt(t, lo)}, ${dFmt(t, hi)}] · ${v(gt)} vs ${v(gb)}</div>
-      <div class="tags">${tag}</div></div>`;
+      <div class="tags">${nStar > 1 && t.key === pk ? `<span class="tag">本实验主指标</span>` : ""}${tag}</div></div>`;
   }).join("");
 }
 
