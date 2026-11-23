@@ -209,9 +209,14 @@ class CommandSource(_Base):
         self.env.update({str(k): str(v) for k, v in (s.get("env") or {}).items()})
 
     def _run(self, sql):
+        # 相对命令（如 python3 tools/kg_query.py）按配置文件所在目录解析：
+        # 在 skill 根目录用 --config template/xxx.yaml 跑 probe 时也能找到脚本
+        cwd = None
+        if getattr(C, "CONFIG_PATH", ""):
+            cwd = os.path.dirname(os.path.abspath(os.path.expanduser(C.CONFIG_PATH)))
         try:
             p = subprocess.Popen(self.cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                 text=True, env=self.env)
+                                 text=True, env=self.env, cwd=cwd)
         except FileNotFoundError:
             raise SourceError("找不到取数命令：%s" % self.cmd[0])
         out = {}

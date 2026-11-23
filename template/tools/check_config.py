@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """校验 dashboard.yaml，并可选连上数据源做一次接入自检。
 
-用法（在看板目录下）：
+用法（在看板目录下，用该目录的 .venv/bin/python；或在已装 flask + PyYAML 的环境里）：
   python3 tools/check_config.py                 # 只校验配置结构 + 预置指标
   python3 tools/check_config.py --probe         # 再连数据源，查昨天各步事件量和分组列覆盖
   python3 tools/check_config.py --probe --date 20261019 --scope ALL
@@ -22,7 +22,13 @@ def main():
     ap.add_argument("--scope", help="自检范围 key，默认第一个")
     a = ap.parse_args()
     os.environ["DASH_CONFIG"] = a.config
-    from dashboard import app as A, config as C, jobs, sources, sqlgen
+    try:
+        from dashboard import app as A, config as C, jobs, sources, sqlgen
+    except ModuleNotFoundError as ex:
+        print("✗ 缺少依赖 %s：请用装好依赖的解释器运行。\n"
+              "  生成后的看板目录：`.venv/bin/python tools/check_config.py ...`；\n"
+              "  或先 `pip install -r requirements.txt`（flask + PyYAML）。" % (ex.name or ex))
+        return 2
 
     try:
         c = C.load(a.config)
@@ -55,15 +61,16 @@ def main():
     ok = True
     print("\n%s 范围 %s 的事件量：" % (d, sc))
     for s in C.all_steps():
-        r = got.get(s["event"])
+        r = got.get(s["key"])
         if not r:
             ok = False
-            print("  ✗ %-10s %-24s 没有数据（事件名写错？或这天还没落表）" % (s["key"], s["event"]))
+            print("  ✗ %-10s %-24s 没有数据（事件名写错？条件太严？或这天还没落表）" % (s["key"], s["event"]))
         else:
             print("  ✓ %-10s %-24s %10s 条 %9s 设备  分组列非空 %5.1f%%"
                   % (s["key"], s["event"], format(int(r["n"]), ","), format(int(r["uv"]), ","), 100 * int(r["with_group"]) / max(int(r["n"]), 1)))
     idf = set(c["experiment"]["identify_events"])
-    if idf and not any(int((got.get(e) or {}).get("with_group") or 0) for e in idf):
+    id_steps = [s["key"] for s in C.all_steps() if s["event"] in idf]
+    if id_steps and not any(int((got.get(k) or {}).get("with_group") or 0) for k in id_steps):
         print("  ⚠ identify_events 里的事件这天都没带分组信息；没有实验在跑时属正常，否则检查 experiment.group.column")
     return 0 if ok else 4
 

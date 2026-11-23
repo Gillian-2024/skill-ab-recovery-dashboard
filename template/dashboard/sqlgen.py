@@ -126,7 +126,14 @@ def where_scope(key, subs=None):
     s = "(%s)" % scope_of(key)["where"]
     subs = check_subs(subs)
     if subs:
-        s += " AND %s IN (%s)" % (q(_cfg()["subscope"]["column"]), ", ".join("'%s'" % v for v in subs))
+        col = _cfg()["subscope"]["column"]
+        # 范围本身已把细分列钉死（如 RU 范围里 region = 'RU'）时，再按国家细分必然为空：
+        # 直接报清楚的错，别让查询静默返回 0 行
+        m = re.search(r"\b%s\s*=\s*'([^']*)'" % re.escape(col), scope_of(key)["where"])
+        if m and m.group(1) not in subs:
+            raise ValueError("范围 %s 已限定 %s = %s，不能再按「%s」细分；要看国家请把该范围的 where 放宽再试"
+                             % (key, col, m.group(1), _cfg()["subscope"].get("label", col)))
+        s += " AND %s IN (%s)" % (q(col), ", ".join("'%s'" % v for v in subs))
     return s
 
 
@@ -745,12 +752,27 @@ GROUP BY grp{", d" if daily else ""}"""
 
 
 def probe_sql(scope, d):
-    """接入自检：某一天各步事件条数 / 设备数，以及分组列非空的事件占比。"""
+    """接入自检：某一天各步事件条数 / 设备数，以及分组列非空的占比。
+    每步按自己的 where 过滤；带 tier_where 的步骤按对应档位条件（OR）合并，避免「事件有数但漏斗链路为空」。"""
     g = q(_cfg()["experiment"]["group"]["column"])
-    evs = sorted({s["event"] for s in C.all_steps()})
-    return f"""
-SELECT {EV()} AS ev, COUNT(*) AS n, COUNT(DISTINCT {DEV()}) AS uv,
+    base, _ = _tiers()
+    tiers = {t["key"]: t for t in base}
+    parts = []
+    for s in C.all_steps():
+        cond = ["%s = '%s'" % (EV(), _sq(s["event"]))]
+        if s.get("where"):
+            cond.append("(%s)" % s["where"])
+        tw = s.get("tier_where") or {}
+        if tw:
+            alt = []
+            for tk, w in tw.items():
+                t = tiers.get(tk)
+                if t:
+                    alt.append("((%s) AND (%s))" % (t.get("where") or "1 = 1", w))
+            if alt:
+                cond.append("(" + " OR ".join(alt) + ")")
+        parts.append(f"""SELECT '{_sq(s["key"])}' AS ev, COUNT(*) AS n, COUNT(DISTINCT {DEV()}) AS uv,
   SUM(CASE WHEN {g} IS NOT NULL THEN 1 ELSE 0 END) AS with_group
 FROM {T()}
-WHERE {where_dates(d, d)} AND {where_scope(scope)} AND {EV()} IN ({", ".join("'%s'" % _sq(e) for e in evs)})
-GROUP BY {EV()}"""
+WHERE {where_dates(d, d)} AND {where_scope(scope)} AND {" AND ".join(cond)}""")
+    return "\nUNION ALL\n".join(parts)

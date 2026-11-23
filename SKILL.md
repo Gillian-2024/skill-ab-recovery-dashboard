@@ -38,10 +38,12 @@ description: 访谈用户的数据口径和实验回收习惯，一键生成一�
 
 ## 核心执行步骤（按优先级）
 
+> 以下命令都在 skill 根目录执行：`cd ~/.claude/skills/ab-recovery-dashboard`。生成后的看板命令（`./start.sh`、`tools/...`）在目标目录执行。
+
 1. **先跑演示，确认环境可用。** `python3 scripts/generate.py <临时目录> --demo --port <端口>`，再 `cd <临时目录> && ./start.sh`。要求 Python ≥ 3.9，可访问 PyPI。跑不起来先修环境，不进访谈。用户只是想看效果时，到这一步就交付。
 2. **访谈口径。** 按 `references/interview.md` 的 4 轮（数据源 → 表结构 → 漏斗 → 实验）提问；用户贴了 DDL / SQL / 文档就先从里面读，只请用户确认推断。每轮把对应的 yaml 片段给用户看。凭据不在对话里回显、不写进 yaml。
-3. **写配置并校验。** 以 `template/dashboard.example.yaml` 为底稿写 `dashboard.yaml`（字段见 `references/config-schema.md`），运行 `python3 template/tools/check_config.py --config <yaml>` 直到通过。
-4. **生成看板。** `python3 scripts/generate.py <目标目录> --config <yaml> [--port N] --probe`。`--probe` 会查昨天各步事件量和分组列覆盖：有「没有数据」的步骤，逐个和用户核对事件名 / 条件，改 yaml 后重跑 `tools/check_config.py --probe`。
+3. **写配置并校验。** 以 `template/dashboard.example.yaml` 为底稿写 `dashboard.yaml`（字段见 `references/config-schema.md`），运行 `python3 template/tools/check_config.py --config <yaml>` 直到通过。该脚本依赖 flask + PyYAML：本机 python3 没装时，用生成后的看板目录 `.venv/bin/python`，或先在当前环境 `pip install -r template/requirements.txt`（脚本缺依赖时会直接给出提示）。
+4. **生成看板。** `python3 scripts/generate.py <目标目录> --config <yaml> [--port N] --probe`。`--probe` 会查昨天各步事件量、设备量和分组列覆盖，且每步按自己的 `where` / `tier_where` 过滤（能发现「事件有数但漏斗链路为空」）：有「没有数据」的步骤，逐个和用户核对事件名 / 条件，改 yaml 后重跑 `tools/check_config.py --probe`。
 5. **启动并拉第一批数。** `./start.sh`，打开 `http://127.0.0.1:<端口>`，日常漏斗页点「从数据源刷新」（单次最多 31 天）。确认核心指标卡、漏斗表、趋势图都有数。
 6. **建第一个实验回收（如用户有实验）。** 实验回收页「新建回收」：分组号 + 角色（对照 / 实验）+ 流量占比、上线日、开窗日、勾指标。看「分流检查」是否通过、结论提要是否到了正确节点。
 7. **交付说明。** 告诉用户：每天 `schedule.daily_at` 自动续拉、未冻结实验每天续跑；常驻运行用 `python3 tools/install_service.py` 生成 launchd / systemd 配置（只打印，用户自己安装）；口径规则见 `references/best-practices.md`。
