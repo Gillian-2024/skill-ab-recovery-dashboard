@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Search Dashboard</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232f6fdd'/%3E%3Ccircle cx='7' cy='7' r='3.2' fill='none' stroke='white' stroke-width='1.6'/%3E%3Cpath d='M9.4 9.4 12.5 12.5' stroke='white' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<aside class="side">
+  <div class="brand">搜索回收看板<small>search · analytics</small></div>
+  <nav>
+    <a href="#funnel" data-tab="funnel">搜索漏斗</a>
+    <a href="#obs" data-tab="obs">实验收益总览</a>
+    <a href="#exp" data-tab="exp">具体实验回收</a>
+    <a href="#hot" data-tab="hot">热词收益</a>
+    <a href="#metrics" data-tab="metrics">指标库</a>
+    <a href="#logs" data-tab="logs">任务日志</a>
+  </nav>
+  <div class="side-foot" id="sideFoot"></div>
+</aside>
+
+<main>
+  <div id="health"></div>
+  <!-- 漏斗 -->
+  <section id="tab-funnel" class="tab">
+    <header class="bar">
+      <div><h1>搜索全链路漏斗</h1><div class="ctx" id="fCtx"></div></div>
+      <div class="controls">
+        <div class="seg" id="mktSeg"></div>
+        <div class="fcountry" id="fReg" title="选国家；留空 = 整个机房"></div>
+        <input type="date" id="fStart"> <span class="muted">至</span> <input type="date" id="fEnd">
+        <div class="seg" id="tierSeg">
+          <button data-tier="all" class="on">全量</button><button data-tier="site">站内</button><button data-tier="tb">Toolbar</button>
+        </div>
+        <button class="btn" id="fRefresh">从数仓刷新</button>
+      </div>
+    </header>
+    <div id="fNotice"></div>
+    <div class="card-h"><h2>核心指标</h2><button type="button" class="btn copy" data-copy="tiles">复制表格</button></div>
+    <div class="tiles" id="fTiles"></div>
+    <div class="card"><div class="card-h"><h2>核心指标周均走势（2026-08-03 起）</h2><button type="button" class="btn copy" data-copy="coreWeek">复制表格</button></div>
+      <div class="seg small" id="wkSeg"></div>
+      <div id="fCoreWeek" class="chart"></div>
+      <p class="foot" id="fCoreWeekFoot"></p></div>
+    <div class="card"><div class="card-h"><h2>结果页点击渗透率三档 × 结果页加载 UV（逐日）</h2><button type="button" class="btn copy" data-copy="nsMix">复制表格</button></div>
+      <div id="fNsMix" class="chart"></div>
+      <div id="fNsMixLoad" class="chart"></div>
+      <p class="foot" id="fNsMixFoot"></p></div>
+    <div class="card" id="fSplitCard"><div class="card-h"><h2>结果页 / 中间页「为你推荐」分开看（2026-11-16 起）</h2><button type="button" class="btn copy" data-copy="split">复制表格</button></div>
+      <div id="fSplit"></div>
+      <div class="seg small" id="splitSeg"></div>
+      <div id="fSplitTrend" class="chart"></div>
+      <p class="foot" id="fSplitFoot"></p></div>
+    <div class="card"><div class="card-h"><h2>UV 转化漏斗（全量 / 站内 / Toolbar，窗口日均）</h2><button type="button" class="btn copy" data-copy="flow">复制表格</button></div>
+      <div id="fFlow"></div></div>
+    <div class="card"><div class="card-h"><h2>漏斗条形图（全量 / 站内 / Toolbar）</h2><button type="button" class="btn copy" data-copy="steps">复制表格</button></div><div id="fSteps"></div></div>
+    <div class="card"><div class="card-h"><h2>逐日趋势</h2><button type="button" class="btn copy" data-copy="trend">复制表格</button></div>
+      <div class="seg small" id="trendSeg"></div>
+      <div id="fTrend" class="chart"></div>
+      <p class="foot">结果页点击渗透率的事件与过滤同实验（卡片点击 UV 排兜底 ÷ 结果页加载 UV），这里按天去重、逐日计算；其余三条为设备-天包含式。</p>
+    </div>
+    <div class="card"><div class="card-h"><h2>Top20 位置 CTR（PV，排兜底）</h2><button type="button" class="btn copy" data-copy="pos">复制表格</button></div><div id="fPos" class="chart"></div></div>
+    <div class="card"><div class="card-h"><h2>逐日转化（当前档）</h2><button type="button" class="btn copy" data-copy="flowDaily">复制表格</button></div><div class="scroll" id="fFlowDaily"></div>
+      <details class="trend"><summary>原始 UV（各事件独立去重，相邻两步不可相除）</summary>
+        <div class="card-h"><span></span><button type="button" class="btn copy" data-copy="daily">复制表格</button></div><div class="scroll" id="fTable"></div></details></div>
+    <div class="card"><div class="card-h"><h2>搜索业务月度 LTV（SGP）</h2><button type="button" class="btn copy" data-copy="ltv">复制表格</button></div><div id="fLtv"></div></div>
+    <p class="foot">口径：事件表；卡片指标排除 <code>from=no_results_recommend</code>；播放取 from = search / search_related / search_related_feed；3s = <code>is_3s_valid_play</code> 或 <code>play_duration &gt; 3000</code>。
+      无结果率 = 无结果 UV ÷ 结果页加载 UV（设备级）。SG / EU 为整机房口径。转化漏斗与原始 UV 的口径差异见漏斗表下方说明。</p>
+  </section>
+
+  <!-- 实验 -->
+  <section id="tab-exp" class="tab" hidden>
+    <header class="bar"><h1>具体实验回收</h1><button class="btn primary" id="newExpBtn">新建回收</button></header>
+    <div class="card" id="newExp" hidden>
+      <h2 id="expFormTitle">新建回收</h2>
+      <form id="expForm" class="form">
+        <div class="full parse-box"><label>一键识别分组<textarea id="grpPaste" rows="2" placeholder="从飞书 / Excel 选中整张分组表（含表头）复制，粘贴到这里：自动认集群、国家、组号、组名和对照组"></textarea></label>
+          <div id="grpParseRes" class="muted"></div><small id="grpParseMsg"></small></div>
+        <label>实验名<input name="name" required placeholder="例：搜索排序点击加权 v2"></label>
+        <label>集群<select name="market" id="expMkt"></select></label>
+        <div class="lbl-box" id="regBox">国家
+          <details class="dd" id="regDD">
+            <summary id="regSum">全部</summary>
+            <div class="dd-pop">
+              <input type="search" id="regQ" placeholder="搜代码或国名，如 TR / 土耳其">
+              <div class="dd-acts"><button type="button" class="btn copy" id="regClr">清空 = 不按国家筛</button></div>
+              <div id="regList" class="dd-list"></div>
+            </div>
+          </details>
+          <small id="regHint"></small>
+        </div>
+        <label>读数范围<select name="excl_src"><option value="">全部 source</option><option value="5">排除热词（source 5）</option></select><small>按事件排除 exp_id 里带 "source":5 的事件；第四轮起默认排除</small></label>
+        <label>上线日<input type="date" name="launch"><small>实验配置生效当天；人均 VV 的 P99 封顶取这天之前 7 天。留空 = 开窗日</small></label>
+        <label>开窗日<input type="date" name="start" required><small>读数从这天算起（可晚于上线日，跳过放量期）</small></label>
+        <label>结束日<input type="date" name="end"><small>留空 = 昨天；结束日前每日自动续跑</small></label>
+        <fieldset class="full"><legend>分组（exp_id；角色必须手选）</legend>
+          <div id="grpRows"></div>
+          <button type="button" class="btn ghost" id="addGrp">+ 加一组</button>
+        </fieldset>
+        <fieldset class="full"><legend>指标 <button type="button" class="btn copy" id="dkAll" title="勾选的指标全部 By天 / 全部取消">By天 全选</button></legend><div id="expMetrics" class="mk-grid"></div><small class="muted">勾「By天」= 除全窗口读数外，再按天出趋势；By天 在全窗口结果出来后补算，不挡读数。</small></fieldset>
+        <div class="full"><button class="btn primary" type="submit" id="expSubmit">提交并跑数</button> <button class="btn" type="button" id="expCancel">取消</button> <span id="expMsg" class="muted"></span>
+          <p class="foot" id="expEditHint" hidden>只加指标 / 只加 By天：保留已出结果，只补算新增的部分。改了集群、国家、读数范围、分组或日期（含上线日）：口径变了，整个实验重跑。去掉的指标会连同结果一起删除。</p></div>
+      </form>
+    </div>
+    <div class="exp-layout">
+      <div class="card list" id="expList"></div>
+      <div class="card" id="expDetail"><p class="muted">左侧选一个实验，或新建回收。</p></div>
+    </div>
+  </section>
+
+  <!-- 实验观测 -->
+  <section id="tab-obs" class="tab" hidden>
+    <header class="bar">
+      <div><h1>搜索排序实验收益总览</h1>
+        <div class="ctx">实验数据来自「具体实验回收」全窗口累计，显著 = 双侧 95%（|z| ≥ 1.96）；决策标签照搬规划文档，数据并列展示。推全观测另外取数（周均前后对比，显著 = |t| ≥ 2.18），前后对比会混入同期其他变化，只看方向。</div></div>
+      <div class="controls">
+        <button type="button" class="btn" id="oSync" title="重新读实验规划（示例）：建缺的回收实验 + 核验">同步实验配置</button>
+        <button type="button" class="btn copy" data-copy="obsAll">复制全部表格</button>
+      </div>
+    </header>
+    <div id="oNotice"></div>
+    <p class="foot" id="oLtv"></p>
+    <details class="card hw-verify" id="oVerify"><summary><h2>实验配置核验</h2><span id="oVerifySum" class="muted"></span></summary>
+      <div id="oVerifyBody"></div></details>
+    <div class="ob-key" aria-label="图例">
+      <span><b class="up">▲ +0.30pp</b>显著正向</span><span><b class="down">▼ −0.30pp</b>显著负向</span>
+      <span><b class="ob-ns">↑ +0.10pp</b>方向（不显著）</span>
+      <span class="ob-key-sig"><i class="ob-sig"><i class="up"></i><i></i><i></i></i>三格依次 = 本实验北极星 / 点击→3s / 人均 VV（北极星口径随实验，如 EU 3s 率为站内）</span>
+    </div>
+    <div id="obsBody"><p class="muted">加载中…</p></div>
+  </section>
+
+  <!-- 热词运营 -->
+  <section id="tab-hot" class="tab" hidden>
+    <header class="bar">
+      <div><h1>热词收益</h1><div class="ctx" id="hCtx"></div></div>
+      <div class="controls">
+        <div class="seg" id="hMkt"></div>
+        <input type="date" id="hStart"> <span class="muted">至</span> <input type="date" id="hEnd">
+        <button class="btn" id="hSync" title="重新读热词运营配置（示例）">同步运营配置</button>
+        <button class="btn" id="hRefresh">从数仓刷新</button>
+      </div>
+    </header>
+    <div id="hNotice"></div>
+    <details class="card hw-verify" id="hVerify"><summary><h2>运营配置核验</h2><span id="hVerifySum" class="muted"></span></summary>
+      <div id="hVerifyBody"></div></details>
+    <div class="card-h"><h2>北极星（UV，设备-天去重）</h2><button type="button" class="btn copy" data-copy="hNorth">复制表格</button></div>
+    <div class="tiles hw-north" id="hNorth"></div>
+    <div class="card"><div class="card-h"><h2>结论与下一步</h2></div><div id="hConc"></div>
+      <p class="foot" id="hRule"></p></div>
+    <div class="card"><div class="card-h"><h2>北极星逐日</h2></div>
+      <div class="seg small" id="hTrendSeg"><button data-k="mid" class="on">中间页热词 CTR</button><button data-k="res">结果页 CTR</button></div>
+      <div id="hTrend" class="chart"></div>
+      <p class="foot">按市场各一条线；点图例开关。结果页 CTR 的「主动搜索」对照线在表里，不进图（量级不同会把差异压平）。</p></div>
+    <div class="card"><div class="card-h"><h2>热词消费量逐日</h2><button type="button" class="btn copy" data-copy="hVol">复制表格</button></div>
+      <div class="seg small" id="hVolSeg"><button data-k="hot_uv" class="on">点热词设备数</button><button data-k="search">热词搜索次数</button><button data-k="p3">热词带来的 3s 有效播放</button></div>
+      <div id="hVol" class="chart"></div>
+      <p class="foot">点热词设备数 = <code>search_page_click</code> 且 <code>click='popular'</code> 的设备数（UV，和北极星同源）；热词搜索次数、3s 有效播放来自词级消费聚合表 <code>source='hot'</code>（次数）。多国时「合计」线默认关掉（量级大，会把单国压平），点图例打开。</p></div>
+    <div class="card" id="hTopCard" hidden><div class="card-h"><h2>首屏前三位逐日</h2><button type="button" class="btn copy" data-copy="hTop">复制表格</button></div>
+      <div class="seg small" id="hTopSeg"><button data-k="dev" class="on">点击设备数</button><button data-k="mid_rate">中间页点击率</button><button data-k="p3">3s 有效播放</button><button data-k="ctr">结果页卡片 CTR</button></div>
+      <div id="hTop" class="chart"></div>
+      <p class="foot" id="hTopFoot"></p></div>
+    <div class="card"><div class="card-h"><h2>热词 vs 主动搜索（观测，次数口径）</h2><button type="button" class="btn copy" data-copy="hObs">复制表格</button></div>
+      <div id="hObs"></div>
+      <p class="foot">来自词级消费聚合表：热词 = <code>source='hot'</code>（中间页热词卡渠道），主动搜索 = <code>source='search_page'</code>（其余渠道，含通知栏）。
+        3s 转化率 = 3s 有效播放次数 ÷ 搜索次数（每搜一次带来几个 3s VV）；卡片 CTR = 卡片点击次数 ÷ 卡片曝光次数。无结果率用这张表算比 DWD 低约 40 倍，只看热词和主动搜索的相对高低，绝对值不要外引。</p></div>
+    <div class="card"><div class="card-h"><h2>按位置分档（配置词 × 在线窗口）</h2><button type="button" class="btn copy" data-copy="hTier">复制表格</button></div>
+      <div id="hTier"></div>
+      <p class="foot">权重 = 运营表里的位置。1–3 首屏所有人可见；4–9 只有点了「换一批」的设备看得到，所以「每千可见设备搜索」按各自的可见设备算：首屏用中间页曝光设备，4–9 用点「换一批」设备。位置效应和词本身拆不开（前排本来就放最热的词）。</p></div>
+    <div class="card"><div class="card-h"><h2>词级汇总</h2><span class="hw-tools"><select id="hBatch"></select><label class="muted"><input type="checkbox" id="hFlagOnly"> 只看问题词</label>
+      <button type="button" class="btn copy" data-copy="hWords">复制表格</button></span></div>
+      <div id="hWords"></div>
+      <p class="foot">词按运营配置匹配（原词去首尾空格、转小写后整串相等），只算上线日 ≤ 日期 ≤ 下线日；换批日新旧两批各自计数。下线后残留搜索 = 下线后、且不在其他批次在线期内的搜索。点表头排序。</p></div>
+    <details class="card hw-daily"><summary><h2>词级逐日明细</h2></summary>
+      <div class="card-h"><span class="muted">设备数为「词 × 天」行内去重，不能跨行加总</span><button type="button" class="btn copy" data-copy="hDaily">复制表格</button></div>
+      <div id="hDaily"></div></details>
+  </section>
+
+  <!-- 指标库 -->
+  <section id="tab-metrics" class="tab" hidden>
+    <header class="bar"><h1>指标库</h1>
+      <div class="controls"><button type="button" class="btn" id="vSync" title="重新读发版记录（示例）：更新「分开看」新版本列表">同步版本</button></div>
+    </header>
+    <div class="card" id="verCard"><div class="card-h"><h2>「分开看」新版本列表</h2><button type="button" class="btn copy" data-copy="versions">复制表格</button></div><div id="verBox"></div></div>
+    <div class="grid2">
+      <div class="card"><div class="card-h"><h2>已有指标</h2><button type="button" class="btn copy" data-copy="metrics">复制表格</button></div><div id="metricList"></div></div>
+      <div class="card"><h2 id="mTitle">自定义指标</h2>
+        <form id="mForm" class="form">
+          <label>key<input name="key" required placeholder="top20_ctr"></label>
+          <label>名称<input name="name" required placeholder="Top20 卡片 CTR"></label>
+          <label>类型<select name="kind"><option value="ratio">比率（分子 ÷ 分母）</option><option value="quantile">分位数</option></select></label>
+          <label>分组标签<input name="group" placeholder="自定义"></label>
+          <div class="full ratio-only" id="numBox"></div>
+          <div class="full ratio-only" id="denBox"></div>
+          <div class="full quant-only" id="srcBox" hidden></div>
+          <div class="lbl-box quant-only" hidden>分位数列<div id="qCol"></div></div>
+          <label class="quant-only" hidden>分位点<input name="quantiles" value="0.5,0.9"></label>
+          <div class="full ratio-only checks">
+            <label><input type="checkbox" name="within" checked> 分子只算分母里的设备</label>
+            <label><input type="checkbox" name="cap"> 分子按上线前 7 天单设备单天 P99 封顶</label>
+            <label><input type="checkbox" name="lower"> 越低越好</label>
+          </div>
+          <label class="full">备注<input name="note"></label>
+          <div class="full"><button type="button" class="btn" id="mPreview">生成 SQL 预览</button>
+            <button class="btn primary" type="submit" id="mSubmit">保存</button>
+            <button class="btn" type="button" id="mCancel" hidden>取消编辑</button>
+            <button class="btn" type="button" id="mRestore" hidden>恢复预置</button> <span id="mMsg" class="muted"></span></div>
+        </form>
+        <pre id="mSql" class="sql" hidden></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- 日志 -->
+  <section id="tab-logs" class="tab" hidden>
+    <header class="bar"><h1>任务日志</h1><span class="muted" id="schedInfo"></span></header>
+    <div class="card"><div id="jobList"></div></div>
+  </section>
+</main>
+
+<div id="tip" class="tip" hidden></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

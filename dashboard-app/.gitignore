@@ -1,0 +1,10 @@
+# 运行时数据与备份（库、日志、分享 token 都在 data/）
+data/
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+.env
+tests/
+docs/
+web/fonts/
